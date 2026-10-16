@@ -1,0 +1,3585 @@
+//+------------------------------------------------------------------+
+//|                                                        SL TP.mq5 |
+//|   EA PRO v8.2: Trading Journal Signals & Exact Entry Pin Edition |
+//|   - Hộp SL/TP bám đúng Nến Vào Lệnh thực tế -> Nến hiện tại (bar0)|
+//|   - 3 Vạch Tầng 1-2-3 phóng sang lề phải (Chart Shift) không đè  |
+//|   - Ghim tâm ngắm (⦿) từng lệnh mở + Vẽ đường lịch sử IN -> OUT  |
+//|   - Tự động ghi Nhật Ký Giao Dịch ra file CSV (MQL5\Files\...)   |
+//+------------------------------------------------------------------+
+#property copyright "EA Pro Minimalist UX v8.2 - Trading Journal & Exact Entry"
+#property version   "8.20"
+#property strict
+ 
+#include <Trade\Trade.mqh>
+CTrade trade;
+ 
+// ============================================================================
+// ENUMS CẤU HÌNH
+// ============================================================================
+enum ENUM_UI_TAB
+  {
+   TAB_POSITION = 0,   // 1. Vị Thế & SL/TP
+   TAB_TRAILING = 1,   // 2. ATR Trailing Gốc
+   TAB_RISKNEWS = 2	// 3. Rủi Ro & Mở Khóa
+  };
+ 
+enum ENUM_TRADE_SIDE
+  {
+   SIDE_LONG  = 0,     // Long (Đường Xanh Ngọc Sáng)
+   SIDE_SHORT = 1  	// Short (Đường Hồng Đỏ Sáng)
+  };
+ 
+enum ENUM_SL_CALC_MODE
+  {
+   SL_MODE_ATR_FIRST = 0, // SL: ATR NẾN ĐẦU (First-Day Mult)
+   SL_MODE_ATR_LINE  = 1, // SL: BÁM ĐƯỜNG ATR TRAIL
+   SL_MODE_POINTS	= 2, // SL: NHẬP POINTS
+   SL_MODE_DRAG  	= 3  // SL: KÉO THƯỚC
+  };
+ 
+enum ENUM_VOL_SLTP_RULE
+  {
+   RULE_KEEP_DIST_CALC_CASH = 0, // Giữ cố định SL/TP -> Tính $
+   RULE_SCALE_DIST_BY_VOL   = 1  // Co giãn SL theo Lot mở & %Risk
+  };
+ 
+enum ENUM_MULTI_ORDER_MODE
+  {
+   MULTI_BASKET_VWAP = 0, // Gộp Rổ Lệnh theo Giá TB (VWAP)
+   MULTI_INDIVIDUAL  = 1  // Quản lý Tách Riêng Từng Lệnh
+  };
+ 
+enum ENUM_TRAIL_STYLE
+  {
+   TRAIL_STYLE_AUTO_ATR  = 0, // 1. AUTO TRAIL (>=R)
+   TRAIL_STYLE_BE_FLOAT  = 1, // 2. THẢ TRÔI (CHỈ BE)
+   TRAIL_STYLE_MANUAL_SL = 2  // 3. SL TAY 100%
+  };
+ 
+enum ENUM_ATR_CALC_SOURCE
+  {
+   ATR_SRC_CLOSE_SWING = 0, // NEO: ĐÓNG NẾN (Chỉ nâng bậc khi nến đóng hoàn toàn)
+   ATR_SRC_HIGH_LOW	= 1  // NEO: ĐỈNH/ĐÁY GỐC (High/Low chuẩn Pine)
+  };
+ 
+enum ENUM_SWEEP_PROTECTION
+  {
+   SWEEP_3LAYER_20PCT_1R   = 0, // 🛡 GIÁP 3 TẦNG (20% 1R: Rút râu / Cắt 50% / SL 100%)
+   SWEEP_WAIT_CANDLE_CLOSE = 1, // 💧 CHỐNG RÂU 2 TẦNG (Chờ đóng nến cắt 100%)
+   SWEEP_HARD_SL_ON_LINE   = 2  // SL CỨNG TẠI VẠCH ATR (Chạm vạch là cắt ngay)
+  };
+ 
+enum ENUM_ATR_TF_MODE
+  {
+   ATR_TF_AUTO_ENTRY = 0, // Tự khóa theo Khung Vào Lệnh (Vào H1 xuống M1 vẫn giữ H1)
+   ATR_TF_FIXED_H1   = 1, // Luôn cố định theo khung H1
+   ATR_TF_FIXED_M15  = 2, // Luôn cố định theo khung M15
+   ATR_TF_FIXED_M5   = 3, // Luôn cố định theo khung M5
+   ATR_TF_FIXED_H4   = 4, // Luôn cố định theo khung H4
+   ATR_TF_FIXED_D1   = 5, // Luôn cố định theo khung D1
+   ATR_TF_CHART_CUR  = 6  // Thay đổi theo khung biểu đồ hiện tại
+  };
+ 
+enum ENUM_NEWS_TIME_ZONE
+  {
+   TZ_LOCAL_PC   = 0,  // Giờ Máy Tính (VN)
+   TZ_MT5_SERVER = 1   // Giờ Server Sàn MT5
+  };
+ 
+// ============================================================================
+// THÔNG SỐ ĐẦU VÀO MẶC ĐỊNH
+// ============================================================================
+input group "=== 0. TỰ ĐỘNG CẬP NHẬT NGÀY NEO, KHUNG ATR & GIÁP 3 TẦNG ==="
+input ENUM_ATR_TF_MODE      InpAtrTfMode          	= ATR_TF_AUTO_ENTRY; 	// Khung tính ATR & 3 Tầng (Mặc định: Tự khóa Khung Vào Lệnh)
+input bool                  InpAutoSyncAnchorDate 	= true;              	// Tự động cập nhật Năm|Tháng|Ngày theo ngày & khung mới nhất
+input int                   InpStandbyLookbackBars	= 35;                	// Số nến neo chu kỳ ATR khi tự động sang ngày mới (Bars)
+input ENUM_TRADE_SIDE       InpTradeSide          	= SIDE_LONG;         	// Trade Direction (Khi chưa có lệnh)
+input int                   InpEntryDateYear      	= 2026;              	// Entry Year (Khi tắt tự động cập nhật ngày)
+input int                   InpEntryDateMonth     	= 10;                	// Entry Month
+input int                   InpEntryDateDay       	= 15;                	// Entry Day
+input double                InpCustomEntryPrice   	= 0.0;               	// Entry Price (0 uses Close)
+input int                   InpAtrLength          	= 14;                	// ATR Period (ta.atr RMA)
+input double                InpAtrMultiplier      	= 2.8;               	// ATR Multiplier (Khuyên dùng 2.5 - 3.2 chống nhiễu)
+input double                InpCustomValueForFirstDay = 2.0;               	// First-Day Custom Multiplier (1R từ nến đầu)
+input ENUM_ATR_CALC_SOURCE  InpAtrCalcSource      	= ATR_SRC_CLOSE_SWING;   // Nguồn tính bước nhảy ATR (Close + Nến Đã Đóng)
+input ENUM_SWEEP_PROTECTION InpSweepProtection    	= SWEEP_3LAYER_20PCT_1R; // Chế độ bảo vệ (Mặc định: Giáp 3 Tầng 20% 1R)
+input double                InpTierBufferPctOf1R  	= 20.0;              	// Biên độ Tầng 3 (% của 1R) [Tầng 2 tự động = 1/2 biên này]
+input int                   InpSwingLookbackBars  	= 3;                 	// Số nến rà đáy/đỉnh gần nhất tránh đặt SL sát râu
+input bool                  InpAutoRestartAtrOnBreak  = true;              	// Tự nối chu kỳ mới khi chạm Stop (chế độ chờ)
+ 
+input group "=== 1. QUẢN LÝ VỊ THẾ, SL/TP & NHẬT KÝ TÍN HIỆU ==="
+input double                InpRiskPerTradePct    	= 1.0;               	// Rủi ro mỗi lệnh / rổ lệnh (% Vốn)
+input double                InpTargetRR           	= 2.0;               	// Tỷ lệ R:R đặt Take Profit (Mục tiêu 2R)
+input ENUM_SL_CALC_MODE     InpSlCalcMode         	= SL_MODE_ATR_FIRST; 	// Chế độ đo SL ban đầu
+input ENUM_VOL_SLTP_RULE    InpVolSlTpRule        	= RULE_KEEP_DIST_CALC_CASH; // Quy tắc SL/TP theo Khối lượng mở
+input ENUM_MULTI_ORDER_MODE InpMultiOrderMode     	= MULTI_BASKET_VWAP; 	// Phương án quản lý khi vào Nhiều Lệnh
+input bool                  InpAutoAttachSlTp     	= true;              	// Tự gắn SL/TP cố định 1 lần khi mở lệnh
+input bool                  InpShowJournalSignals 	= true;              	// Hiển thị Tín hiệu Điểm Vào/Ra & Nhật ký trên biểu đồ
+input int                   InpJournalHistoryDays 	= 3;                 	// Số ngày hiển thị lại lịch sử lệnh đã đóng trên biểu đồ
+input bool                  InpAutoExportJournalCsv   = true;              	// Tự động ghi Nhật ký giao dịch ra file .CSV (MQL5\Files)
+input int                   InpManualSlPoints     	= 350;               	// Khoảng SL thủ công (Points)
+input int                   InpBufferPoints       	= 10;                	// Đệm Spread + Trượt giá (Points)
+input double                InpCommissionPerLot   	= 0.0;               	// Phí Commission 2 chiều ($ / 1 Lot)
+ 
+input group "=== 2. CHẾ ĐỘ TRAILING / THẢ TRÔI SL TAY, BE & CHỐT TỪNG PHẦN ==="
+input ENUM_TRAIL_STYLE      InpTrailStyle         	= TRAIL_STYLE_AUTO_ATR;  // Chế độ quản lý SL (Auto ATR / Thả trôi BE / SL Tay 100%)
+input double                InpTrailingStartRR    	= 1.0;               	// Bắt đầu trượt ATR & Khóa 20% 1R khi đạt (R) [Chuẩn: 1.0R]
+input bool                  InpEnablePartialTP    	= true;              	// Bật tự động chốt lời từng phần (TP1)
+input double                InpPartialAtRR        	= 1.0;               	// Chốt từng phần TP1 khi đạt (R) [Chuẩn: 1.0R]
+input double                InpPartialClosePct    	= 50.0;              	// Phần trăm khối lượng chốt TP1 (%) [Chuẩn: 50%]
+input bool                  InpEnableBe           	= true;              	// Bật tự động dời SL về Hòa vốn (BE)
+input double                InpBeTriggerRR        	= 1.0;               	// Mốc lời kích hoạt dời BE (R) [Chuẩn: 1.0R]
+input int                   InpBePlusPoints       	= 10;                	// Số Points cộng thêm vào BE
+input bool                  InpEnableLockProfit   	= true;              	// Bật khóa lợi nhuận tối thiểu 20% của 1R khi đạt 1R
+input double                InpLockTriggerRR      	= 1.0;               	// Mốc lời kích hoạt khóa 20% của 1R (R)
+input double                InpLockLevelRR        	= 0.20;              	// Mức SL khóa lợi nhuận tối thiểu (0.20R = 20% của 1R)
+ 
+input group "=== 3. KIỂM SOÁT LỖ 3 TẦNG & MÃ PIN MỞ KHÓA (Tuan123) ==="
+input bool                  InpEnableRiskGuard    	= true;              	// Bật bảo vệ lỗ tối đa Ngày / Tuần / Tháng
+input double                InpMaxDailyLossPct    	= 5.0;               	// Lỗ tối đa NGÀY (%)
+input double                InpMaxWeeklyLossPct   	= 10.0;              	// Lỗ tối đa TUẦN (%)
+input double                InpMaxMonthlyLossPct  	= 15.0;              	// Lỗ tối đa THÁNG (%)
+input double                InpFallbackEquity     	= 100000.0;          	// Vốn tính Risk ($)
+input double                InpCooldownHours      	= 8.0;               	// Thời gian Hạ nhiệt tối thiểu sau khi bị khóa (Giờ)
+input bool                  InpEnableHalfRiskRec  	= true;              	// Tự động giảm 50% Risk sau khi vừa mở khóa
+input double                InpRecoveryTargetPct  	= 1.0;               	// Mục tiêu lãi để khôi phục 100% hạn mức (% Vốn)
+input int                   InpMaxRecoveryOrders  	= 1;                 	// Số lệnh mở tối đa khi đang trong chế độ Phục hồi
+input string                InpUnlockPinCode      	= "Tuan123";         	// Mã PIN Mở khóa khẩn cấp (Mặc định: Tuan123)
+input double                InpPinExtraBufferPct  	= 1.5;               	// Biên độ chịu lỗ cấp thêm khi Mở khóa bằng PIN (%)
+ 
+input group "=== 4. LẬP LỊCH TIN TỨC LINH HOẠT (1 TIN HOẶC NHIỀU TIN) ==="
+input bool                  InpEnableNewsFilter   	= true;              	// Bật bộ lọc cấm trade theo tin tức
+input ENUM_NEWS_TIME_ZONE   InpNewsTimeZone       	= TZ_LOCAL_PC;       	// Múi giờ áp dụng cho lịch tin
+input int                   InpMinBeforeNews      	= 2;                 	// Cấm trade TRƯỚC tin (Phút)
+input int                   InpMinAfterNews       	= 2;                 	// Cấm trade SAU tin (Phút)
+input bool                  InpEnableSlot1        	= true;              	// [Bật/Tắt] Khung giờ Tin 1 (Mặc định: BẬT)
+input string                InpNewsSlot1          	= "19:30";           	// Giờ Tin 1 (HH:MM)
+input bool                  InpEnableSlot2        	= false;             	// [Bật/Tắt] Khung giờ Tin 2 (Mặc định: TẮT)
+input string                InpNewsSlot2          	= "21:00";           	// Giờ Tin 2 (HH:MM)
+input bool                  InpEnableSlot3        	= false;             	// [Bật/Tắt] Khung giờ Tin 3 (Mặc định: TẮT)
+input string                InpNewsSlot3          	= "22:30";           	// Giờ Tin 3 (HH:MM)
+ 
+input group "=== 5. HIỂN THỊ BIỂU ĐỒ & GIAO DIỆN ==="
+input bool                  InpShowAnchoredAtrLine	= true;              	// Vẽ đường bậc thang ATR & 3 vạch Tầng 1-2-3 trên biểu đồ
+input bool                  InpShowSizerLines     	= true;              	// Hiện thước SL/TP & Vùng màu trên biểu đồ
+input int                   InpStartPanelX        	= 14;                	// Tọa độ X ban đầu (px)
+input int                   InpStartPanelY        	= 82;                	// Tọa độ Y ban đầu (px)
+input int                   InpFontSize           	= 9;                 	// Cỡ chữ hiển thị (8 - 11)
+ 
+// ============================================================================
+// BIẾN RUNTIME
+// ============================================================================
+string                 PREFIX  	= "EAP82_UI_";
+string                 VIS_PREFIX  = "EAP82_VIS_";
+string                 DRAG_PREFIX = "EAP82_SZ_";
+string                 JRN_PREFIX  = "EAP82_JRN_";
+ 
+ENUM_UI_TAB            g_activeTab = TAB_POSITION;
+ 
+ENUM_ATR_TF_MODE       g_atrTfMode;
+ENUM_TIMEFRAMES        g_resolvedAtrTf   = PERIOD_CURRENT;
+bool                   g_autoSyncDate	= true;
+int                    g_standbyLookback = 35;
+ 
+ENUM_TRADE_SIDE        g_tradeSide;
+int                    g_entryDateYear, g_entryDateMonth, g_entryDateDay;
+double                 g_entryPriceInput;
+int                    g_atrLength;
+double                 g_atrMultiplier;
+double                 g_customValueForFirstDay;
+ENUM_ATR_CALC_SOURCE   g_atrSource;
+ENUM_SWEEP_PROTECTION  g_sweepMode;
+double                 g_tierPctOf1R;
+int                    g_swingLookback;
+bool                   g_autoRestartAtr;
+ 
+double                 g_pineLatestAtr  	= 0.0;
+double                 g_pineEntryLevel 	= 0.0;
+double                 g_pineTrailingStop   = 0.0;
+double                 g_pineFirstBarSlDist = 0.0;
+bool                   g_pineStopPlotting   = false;
+bool                   g_pineStartCalc  	= false;
+int                    g_tier1SavedCount	= 0;
+int                    g_tier2HalfCutCount  = 0;
+ 
+bool                   g_isTrailingArmedNow = false;
+bool                   g_pinSizerEntry  	= false;
+bool                   g_showJournal    	= true;
+ulong                  g_lastLoggedDealId   = 0;
+ 
+bool                   g_enRiskGuard;
+double                 g_maxDailyLossPct, g_maxWeeklyLossPct, g_maxMonthlyLossPct;
+double                 g_customEquity;
+double                 g_cooldownHours;
+bool                   g_enHalfRiskRec;
+double                 g_recoveryTargetPct;
+int                    g_maxRecOrders;
+string                 g_enteredPinStr	= "****";
+datetime               g_breachTimestamp  = 0;
+bool                   g_inCooldownLock   = false;
+int                    g_cooldownRemSec   = 0;
+bool                   g_inRecoveryMode   = false;
+double                 g_recStartMonthPct = 0.0;
+double                 g_pinExtraDayPct   = 0.0;
+double                 g_pinExtraWeekPct  = 0.0;
+double                 g_pinExtraMonthPct = 0.0;
+int                    g_lastDayOfYear	= -1;
+bool                   g_wasBreachedPrev  = false;
+ 
+bool                   g_enNewsFilter;
+ENUM_NEWS_TIME_ZONE    g_newsTz;
+int                    g_minBeforeNews, g_minAfterNews;
+bool                   g_enSlot1, g_enSlot2, g_enSlot3;
+string                 g_newsSlot1, g_newsSlot2, g_newsSlot3;
+ 
+ENUM_SL_CALC_MODE      g_slMode;
+ENUM_VOL_SLTP_RULE     g_volRule;
+ENUM_MULTI_ORDER_MODE  g_multiMode;
+ENUM_TRAIL_STYLE       g_trailStyle;
+double                 g_riskPct;
+double                 g_targetRR;
+int                    g_manualSlPts;
+int                    g_bufferPts;
+double                 g_commPerLot;
+bool                   g_autoSlTp;
+ 
+bool                   g_enPartial;
+double                 g_partialRR, g_partialPct;
+bool                   g_enBe;
+double                 g_beRR;
+int                    g_bePoints;
+bool                   g_enLock;
+double                 g_lockTrigRR, g_lockLvlRR;
+bool                   g_enTrail;
+double                 g_trailStartRR;
+ 
+bool                   g_showAtrPlot;
+bool                   g_showSizer;
+ 
+int                    g_panelX        	= 14;
+int                    g_panelY        	= 82;
+int                    g_panelW        	= 470;
+int                    g_panelH        	= 310;
+int                    g_headerH       	= 26;
+bool                   g_isDraggingPanel   = false;
+int                    g_dragOffsetX   	= 0;
+int                    g_dragOffsetY   	= 0;
+bool                   g_prevMouseLeftDown = false;
+int                    g_cornerPresetIdx   = 0;
+ 
+double                 g_sizerEntryPrice   = 0.0;
+double                 g_sizerSlPrice  	= 0.0;
+double                 g_sizerTpPrice  	= 0.0;
+double                 g_pinnedSlDist  	= 0.0;
+ 
+bool                   g_isMinimized   	= false;
+bool                   g_manualForceLock   = false;
+bool                   g_riskBreached  	= false;
+string                 g_breachReason  	= "";
+bool                   g_newsLockedState   = false;
+string                 g_newsStatusText	= "Đang kiểm tra lịch tin...";
+ 
+color                  C_BG_HEADER  = C'15,23,42';
+color                  C_BG_DRAG	= C'30,58,138';
+color                  C_BG_BODY	= C'22,30,46';
+color                  C_BG_HUD 	= C'13,38,44';
+color                  C_BG_CARD	= C'30,41,59';
+color                  C_BORDER 	= C'60,75,98';
+color                  C_EDIT_BG	= C'248,250,252';
+color                  C_EDIT_MUTED = C'148,163,184';
+color                  C_EDIT_TXT   = C'15,23,42';
+color                  C_TAB_ACTIVE = C'37,99,235';
+color                  C_TAB_IDLE   = C'45,55,72';
+color                  C_BTN_ON 	= C'16,185,129';
+color                  C_BTN_OFF	= C'71,85,105';
+color                  C_BTN_LOCK   = C'185,28,28';
+color                  C_BTN_BUY	= C'37,99,235';
+color                  C_BTN_SELL   = C'220,38,38';
+color                  C_BTN_ACT	= C'217,119,6';
+color                  C_BTN_MODE   = C'124,58,237';
+ 
+color                  C_ATR_LONG   = C'0,255,157';
+color                  C_ATR_SHORT  = C'255,64,129';
+color                  C_TIER1_RAY  = clrGold;
+color                  C_TIER2_RAY  = clrDeepSkyBlue;
+color                  C_TIER3_RAY  = clrOrangeRed;
+ 
+//+------------------------------------------------------------------+
+//| Chuyển đổi tên Khung Thời Gian gọn đẹp                       	|
+//+------------------------------------------------------------------+
+string GetTfShortName(ENUM_TIMEFRAMES tf)
+  {
+   ENUM_TIMEFRAMES realTf = (tf == PERIOD_CURRENT) ? _Period : tf;
+   switch(realTf)
+ 	{
+  	case PERIOD_M1:  return "M1";
+  	case PERIOD_M5:  return "M5";
+  	case PERIOD_M15: return "M15";
+  	case PERIOD_M30: return "M30";
+  	case PERIOD_H1:  return "H1";
+  	case PERIOD_H4:  return "H4";
+  	case PERIOD_D1:  return "D1";
+  	case PERIOD_W1:  return "W1";
+  	case PERIOD_MN1: return "MN";
+  	default:     	return EnumToString(realTf);
+ 	}
+  }
+ 
+//+------------------------------------------------------------------+
+//| Đồng bộ Ô Năm | Tháng | Ngày theo Khung TG & Ngày mới nhất    	|
+//+------------------------------------------------------------------+
+void SyncAnchorDateFields(ENUM_TIMEFRAMES activeTf, datetime openOrderTime)
+  {
+   if(!g_autoSyncDate)
+  	return;
+ 
+   datetime latestTfBarTime = iTime(_Symbol, activeTf, 0);
+   datetime refTime     	= (latestTfBarTime > 0) ? latestTfBarTime : TimeCurrent();
+   if(openOrderTime > 0 && openOrderTime > refTime)
+  	refTime = openOrderTime;
+ 
+   if(refTime <= 0)
+  	return;
+ 
+   MqlDateTime dt;
+   TimeToStruct(refTime, dt);
+ 
+   bool changed = (g_entryDateYear != dt.year || g_entryDateMonth != dt.mon || g_entryDateDay != dt.day);
+   g_entryDateYear  = dt.year;
+   g_entryDateMonth = dt.mon;
+   g_entryDateDay   = dt.day;
+ 
+   if(changed || g_activeTab == TAB_TRAILING)
+ 	{
+  	if(ObjectFind(0, PREFIX + "Ed_Yr") >= 0)
+         ObjectSetString(0, PREFIX + "Ed_Yr", OBJPROP_TEXT, IntegerToString(g_entryDateYear));
+  	if(ObjectFind(0, PREFIX + "Ed_Mo") >= 0)
+         ObjectSetString(0, PREFIX + "Ed_Mo", OBJPROP_TEXT, IntegerToString(g_entryDateMonth));
+  	if(ObjectFind(0, PREFIX + "Ed_Dy") >= 0)
+         ObjectSetString(0, PREFIX + "Ed_Dy", OBJPROP_TEXT, IntegerToString(g_entryDateDay));
+ 	}
+  }
+ 
+//+------------------------------------------------------------------+
+//| Nhận diện chuẩn Khung Thời Gian của lệnh (Ưu tiên H1, M15, H4)   |
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES DetectBestMatchingTimeframeForSlDist(double actualSlDist)
+  {
+   if(actualSlDist <= 0.0)
+  	return _Period;
+ 
+   ENUM_TIMEFRAMES candidates[6] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+   ENUM_TIMEFRAMES bestTf    	= PERIOD_H1;
+   double      	minDiff   	= 1e18;
+ 
+   for(int idx = 0; idx < 6; idx++)
+ 	{
+  	MqlRates r[];
+      ArraySetAsSeries(r, false);
+  	int copied = CopyRates(_Symbol, candidates[idx], 0, g_atrLength * 3 + 10, r);
+  	if(copied <= 2)
+     	continue;
+ 
+  	double sumTR = 0.0;
+  	double atr   = 0.0;
+  	int	len   = MathMax(1, g_atrLength);
+  	for(int i = 0; i < copied - 1; i++)
+    	{
+     	double tr = r[i].high - r[i].low;
+     	if(i > 0)
+       	{
+        	double hc = MathAbs(r[i].high - r[i - 1].close);
+        	double lc = MathAbs(r[i].low  - r[i - 1].close);
+        	if(hc > tr) tr = hc;
+        	if(lc > tr) tr = lc;
+       	}
+     	if(i < len) { sumTR += tr; atr = sumTR / (double)(i + 1); }
+     	else    	{ atr = (atr * (double)(len - 1) + tr) / (double)len; }
+    	}
+ 
+  	double expectedSlDist = atr * g_customValueForFirstDay;
+  	double diff       	= MathAbs(expectedSlDist - actualSlDist);
+  	if(diff < minDiff)
+    	{
+     	minDiff = diff;
+     	bestTf  = candidates[idx];
+    	}
+ 	}
+   return bestTf;
+  }
+ 
+ENUM_TIMEFRAMES ResolveActiveAtrTimeframe(int openOrderCount, long anchorPosId, datetime earliestOpenTime, double actualSlDist)
+  {
+   if(g_atrTfMode == ATR_TF_FIXED_H1)  return PERIOD_H1;
+   if(g_atrTfMode == ATR_TF_FIXED_M15) return PERIOD_M15;
+   if(g_atrTfMode == ATR_TF_FIXED_M5)  return PERIOD_M5;
+   if(g_atrTfMode == ATR_TF_FIXED_H4)  return PERIOD_H4;
+   if(g_atrTfMode == ATR_TF_FIXED_D1)  return PERIOD_D1;
+   if(g_atrTfMode == ATR_TF_CHART_CUR) return _Period;
+ 
+   if(openOrderCount > 0 && anchorPosId > 0)
+ 	{
+  	string gvTfKey   = "EAP82_LOCKTF_" + IntegerToString(anchorPosId);
+  	string gvTfExact = "EAP82_EXACT_"  + IntegerToString(anchorPosId);
+ 
+      if((TimeCurrent() - earliestOpenTime) <= 120)
+    	{
+         GlobalVariableSet(gvTfKey,   (double)_Period);
+         GlobalVariableSet(gvTfExact, 1.0);
+     	return _Period;
+    	}
+ 
+  	bool isExactLocked = GlobalVariableCheck(gvTfExact) ? (GlobalVariableGet(gvTfExact) > 0.5) : false;
+ 
+      if(!isExactLocked && (_Period == PERIOD_H1 || _Period == PERIOD_H4 || _Period == PERIOD_D1))
+    	{
+         GlobalVariableSet(gvTfKey,   (double)_Period);
+         GlobalVariableSet(gvTfExact, 1.0);
+     	return _Period;
+    	}
+ 
+      if(GlobalVariableCheck(gvTfKey))
+    	{
+     	int savedTf = (int)GlobalVariableGet(gvTfKey);
+     	if(savedTf > 0)
+        	return (ENUM_TIMEFRAMES)savedTf;
+    	}
+ 
+  	ENUM_TIMEFRAMES detectedTf = DetectBestMatchingTimeframeForSlDist(actualSlDist);
+      GlobalVariableSet(gvTfKey, (double)detectedTf);
+  	return detectedTf;
+ 	}
+ 
+   return _Period;
+  }
+ 
+//+------------------------------------------------------------------+
+//| Lưu & Khôi phục trạng thái Khóa / Phục hồi                   	|
+//+------------------------------------------------------------------+
+string LockGVKey(string suffix)
+  {
+   return "EAP82_LK_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + suffix;
+  }
+ 
+void SaveLockStateToGV()
+  {
+   GlobalVariableSet(LockGVKey("TIME"),  	(double)g_breachTimestamp);
+   GlobalVariableSet(LockGVKey("REC_MODE"),  g_inRecoveryMode ? 1.0 : 0.0);
+   GlobalVariableSet(LockGVKey("REC_START"), g_recStartMonthPct);
+   GlobalVariableSet(LockGVKey("PIN_EX_D"),  g_pinExtraDayPct);
+   GlobalVariableSet(LockGVKey("PIN_EX_W"),  g_pinExtraWeekPct);
+   GlobalVariableSet(LockGVKey("PIN_EX_M"),  g_pinExtraMonthPct);
+   GlobalVariableSet(LockGVKey("LAST_DOY"),  (double)g_lastDayOfYear);
+  }
+ 
+void LoadLockStateFromGV()
+  {
+   if(GlobalVariableCheck(LockGVKey("TIME")))  	g_breachTimestamp  = (datetime)GlobalVariableGet(LockGVKey("TIME"));
+   if(GlobalVariableCheck(LockGVKey("REC_MODE")))  g_inRecoveryMode   = (GlobalVariableGet(LockGVKey("REC_MODE")) > 0.5);
+   if(GlobalVariableCheck(LockGVKey("REC_START"))) g_recStartMonthPct = GlobalVariableGet(LockGVKey("REC_START"));
+   if(GlobalVariableCheck(LockGVKey("PIN_EX_D")))  g_pinExtraDayPct   = GlobalVariableGet(LockGVKey("PIN_EX_D"));
+   if(GlobalVariableCheck(LockGVKey("PIN_EX_W")))  g_pinExtraWeekPct  = GlobalVariableGet(LockGVKey("PIN_EX_W"));
+   if(GlobalVariableCheck(LockGVKey("PIN_EX_M")))  g_pinExtraMonthPct = GlobalVariableGet(LockGVKey("PIN_EX_M"));
+   if(GlobalVariableCheck(LockGVKey("LAST_DOY")))  g_lastDayOfYear	= (int)GlobalVariableGet(LockGVKey("LAST_DOY"));
+  }
+ 
+void NotifyQuotaRestored(string title, string detail)
+  {
+   string fullMsg = StringFormat("✅ [%s - %s]: %s", _Symbol, title, detail);
+   Alert(fullMsg);
+   SendNotification(fullMsg);
+   PlaySound("ok.wav");
+  }
+ 
+color BlendWithBg(color fg, double alphaPct)
+  {
+   color bg = (color)ChartGetInteger(0, CHART_COLOR_BACKGROUND);
+   double a = MathMax(0.05, MathMin(alphaPct / 100.0, 0.45));
+   int bgR = (bg & 0xFF), bgG = ((bg >> 8) & 0xFF), bgB = ((bg >> 16) & 0xFF);
+   int fgR = (fg & 0xFF), fgG = ((fg >> 8) & 0xFF), fgB = ((fg >> 16) & 0xFF);
+   int r = (int)MathRound(bgR * (1.0 - a) + fgR * a);
+   int g = (int)MathRound(bgG * (1.0 - a) + fgG * a);
+   int b = (int)MathRound(bgB * (1.0 - a) + fgB * a);
+   return (color)(r | (g << 8) | (b << 16));
+  }
+ 
+void ApplyTrailStyleFlags()
+  {
+   if(g_trailStyle == TRAIL_STYLE_AUTO_ATR)
+  	g_enTrail = true;
+   else if(g_trailStyle == TRAIL_STYLE_BE_FLOAT)
+ 	{
+  	g_enTrail = false;
+  	g_enBe	= true;
+ 	}
+   else
+ 	{
+  	g_enTrail = false;
+  	g_enBe	= false;
+  	g_enLock  = false;
+ 	}
+  }
+ 
+void InitParamsFromInputs()
+  {
+   g_atrTfMode          	= InpAtrTfMode;
+   g_resolvedAtrTf      	= _Period;
+   g_autoSyncDate       	= InpAutoSyncAnchorDate;
+   g_standbyLookback    	= MathMax(10, InpStandbyLookbackBars);
+ 
+   g_tradeSide          	= InpTradeSide;
+   g_entryDateYear      	= InpEntryDateYear;
+   g_entryDateMonth     	= InpEntryDateMonth;
+   g_entryDateDay       	= InpEntryDateDay;
+   if(g_autoSyncDate)
+      SyncAnchorDateFields(_Period, 0);
+ 
+   g_entryPriceInput    	= InpCustomEntryPrice;
+   g_atrLength          	= MathMax(1, InpAtrLength);
+   g_atrMultiplier      	= InpAtrMultiplier;
+   g_customValueForFirstDay = InpCustomValueForFirstDay;
+   g_atrSource          	= InpAtrCalcSource;
+   g_sweepMode          	= InpSweepProtection;
+   g_tierPctOf1R        	= MathMax(5.0, MathMin(InpTierBufferPctOf1R, 90.0));
+   g_swingLookback      	= MathMax(1, InpSwingLookbackBars);
+   g_autoRestartAtr     	= InpAutoRestartAtrOnBreak;
+ 
+   g_enRiskGuard        	= InpEnableRiskGuard;
+   g_maxDailyLossPct    	= InpMaxDailyLossPct;
+   g_maxWeeklyLossPct   	= InpMaxWeeklyLossPct;
+   g_maxMonthlyLossPct  	= InpMaxMonthlyLossPct;
+   double realEq        	= AccountInfoDouble(ACCOUNT_EQUITY);
+   g_customEquity       	= (realEq > 0.0) ? NormalizeDouble(realEq, 0) : InpFallbackEquity;
+ 
+   g_cooldownHours      	= InpCooldownHours;
+   g_enHalfRiskRec      	= InpEnableHalfRiskRec;
+   g_recoveryTargetPct  	= InpRecoveryTargetPct;
+   g_maxRecOrders       	= MathMax(1, InpMaxRecoveryOrders);
+   g_enteredPinStr      	= "****";
+ 
+   g_enNewsFilter       	= InpEnableNewsFilter;
+   g_newsTz             	= InpNewsTimeZone;
+   g_minBeforeNews      	= InpMinBeforeNews;
+   g_minAfterNews       	= InpMinAfterNews;
+   g_enSlot1            	= InpEnableSlot1;
+   g_newsSlot1          	= InpNewsSlot1;
+   g_enSlot2            	= InpEnableSlot2;
+   g_newsSlot2          	= InpNewsSlot2;
+   g_enSlot3            	= InpEnableSlot3;
+   g_newsSlot3          	= InpNewsSlot3;
+ 
+   g_slMode             	= InpSlCalcMode;
+   g_volRule            	= InpVolSlTpRule;
+   g_multiMode          	= InpMultiOrderMode;
+   g_trailStyle         	= InpTrailStyle;
+   g_riskPct            	= InpRiskPerTradePct;
+   g_targetRR           	= InpTargetRR;
+   g_manualSlPts        	= InpManualSlPoints;
+   g_bufferPts          	= InpBufferPoints;
+   g_commPerLot         	= InpCommissionPerLot;
+   g_autoSlTp           	= InpAutoAttachSlTp;
+   g_showJournal        	= InpShowJournalSignals;
+ 
+   g_enPartial          	= InpEnablePartialTP;
+   g_partialRR          	= InpPartialAtRR;
+   g_partialPct         	= InpPartialClosePct;
+ 
+   g_enBe               	= InpEnableBe;
+   g_beRR               	= InpBeTriggerRR;
+   g_bePoints           	= InpBePlusPoints;
+ 
+   g_enLock             	= InpEnableLockProfit;
+   g_lockTrigRR         	= InpLockTriggerRR;
+   g_lockLvlRR          	= InpLockLevelRR;
+ 
+   g_trailStartRR       	= InpTrailingStartRR;
+   ApplyTrailStyleFlags();
+ 
+   g_showAtrPlot        	= InpShowAnchoredAtrLine;
+   g_showSizer          	= InpShowSizerLines;
+ 
+   g_panelX             	= InpStartPanelX;
+   g_panelY             	= InpStartPanelY;
+  }
+ 
+double GetEffectiveEquity()
+  {
+   if(g_customEquity > 0.0)
+  	return g_customEquity;
+   double realEq = AccountInfoDouble(ACCOUNT_EQUITY);
+   return (realEq > 0.0) ? realEq : 100000.0;
+  }
+ 
+double GetActiveRiskPercent()
+  {
+   if(g_inRecoveryMode && g_enHalfRiskRec)
+  	return NormalizeDouble(g_riskPct * 0.5, 2);
+   return g_riskPct;
+  }
+ 
+int GetStepDigits(double step)
+  {
+   if(step <= 0.0)
+  	return 2;
+   int digits = 0;
+   double temp = step;
+   while(MathAbs(MathRound(temp) - temp) > 1e-6 && digits < 8)
+ 	{
+  	temp *= 10.0;
+  	digits++;
+ 	}
+   return digits;
+  }
+ 
+double FloorLotStep(double rawLot)
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0.0)
+  	step = 0.01;
+   double lots = MathFloor((rawLot + step * 1e-9) / step) * step;
+   if(lots < minL)
+  	return 0.0;
+   if(lots > maxL)
+  	lots = maxL;
+   return NormalizeDouble(lots, GetStepDigits(step));
+  }
+ 
+int OnInit()
+  {
+   ObjectsDeleteAll(0, "EAPRO");
+   ObjectsDeleteAll(0, "EAP31");
+   ObjectsDeleteAll(0, "EAP40");
+   ObjectsDeleteAll(0, "EAP50");
+   ObjectsDeleteAll(0, "EAP51");
+   ObjectsDeleteAll(0, "EAP60");
+   ObjectsDeleteAll(0, "EAP61");
+   ObjectsDeleteAll(0, "EAP62");
+   ObjectsDeleteAll(0, "EAP70");
+   ObjectsDeleteAll(0, "EAP71");
+   ObjectsDeleteAll(0, "EAP72");
+   ObjectsDeleteAll(0, "EAP73");
+   ObjectsDeleteAll(0, "EAP74");
+   ObjectsDeleteAll(0, "EAP75");
+   ObjectsDeleteAll(0, "EAP76");
+   ObjectsDeleteAll(0, "EAP77");
+   ObjectsDeleteAll(0, "EAP78");
+   ObjectsDeleteAll(0, "EAP79");
+   ObjectsDeleteAll(0, "EAP80");
+   ObjectsDeleteAll(0, "EAP81");
+   ObjectsDeleteAll(0, "PSIZER");
+   ObjectsDeleteAll(0, PREFIX);
+   ObjectsDeleteAll(0, VIS_PREFIX);
+   ObjectsDeleteAll(0, DRAG_PREFIX);
+   ObjectsDeleteAll(0, JRN_PREFIX);
+ 
+   if(UninitializeReason() != REASON_CHARTCHANGE)
+      InitParamsFromInputs();
+ 
+   LoadLockStateFromGV();
+ 
+   // Tự động bật khoảng lề trống bên phải biểu đồ (Chart Shift = 26%) để 3 vạch Tầng 1-2-3 nằm gọn bên phải nến hiện tại!
+   ChartSetInteger(0, CHART_SHIFT, true);
+   if(ChartGetDouble(0, CHART_SHIFT_SIZE) < 22.0)
+      ChartSetDouble(0, CHART_SHIFT_SIZE, 26.0);
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
+ 
+   RebuildCleanPanel(true);
+   ProcessCoreLogic();
+   EventSetTimer(1);
+   return(INIT_SUCCEEDED);
+  }
+ 
+void OnDeinit(const int reason)
+  {
+   EventKillTimer();
+   ChartSetInteger(0, CHART_MOUSE_SCROLL, true);
+   if(reason != REASON_CHARTCHANGE)
+ 	{
+      ObjectsDeleteAll(0, PREFIX);
+      ObjectsDeleteAll(0, VIS_PREFIX);
+      ObjectsDeleteAll(0, DRAG_PREFIX);
+      ObjectsDeleteAll(0, JRN_PREFIX);
+ 	}
+   ChartRedraw(0);
+  }
+ 
+//+------------------------------------------------------------------+
+//| TỰ ĐỘNG GHI FILE NHẬT KÝ GIAO DỊCH (.CSV)                    	|
+//+------------------------------------------------------------------+
+void WriteTradeJournalCsvRow(string eventType, ulong ticket, string sideStr, double volume,
+                             double entryPrice, double slPrice, double tpPrice, double closePrice,
+                             double pointsRes, double netProfitCash, string noteStr)
+  {
+   if(!InpAutoExportJournalCsv)
+  	return;
+ 
+   string fileName = "NhatKy_EAPRO_" + _Symbol + ".csv";
+   bool   fileExists = FileIsExist(fileName);
+   int	handle = FileOpen(fileName, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI, ';');
+   if(handle == INVALID_HANDLE)
+  	return;
+ 
+   if(!fileExists || FileSize(handle) == 0)
+ 	{
+      FileWrite(handle, "ThoiGian", "Ticket", "CapTien", "KhungATR", "SuKien", "Chieu",
+                "Lot", "GiaEntry", "GiaSL", "GiaTP", "GiaDong", "KetQua_Pts", "LaiLo_USD", "GhiChu");
+ 	}
+ 
+   FileSeek(handle, 0, SEEK_END);
+   FileWrite(handle,
+             TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES | TIME_SECONDS),
+             IntegerToString(ticket),
+         	_Symbol,
+             GetTfShortName(g_resolvedAtrTf),
+             eventType,
+         	sideStr,
+             DoubleToString(volume, 2),
+             DoubleToString(entryPrice, _Digits),
+             DoubleToString(slPrice, _Digits),
+             DoubleToString(tpPrice, _Digits),
+             DoubleToString(closePrice, _Digits),
+             DoubleToString(pointsRes, 0),
+             DoubleToString(netProfitCash, 2),
+         	noteStr);
+   FileClose(handle);
+  }
+ 
+//+------------------------------------------------------------------+
+//| VẼ TÍN HIỆU ĐIỂM VÀO LỆNH ĐANG MỞ & LỊCH SỬ NHẬT KÝ GIAO DỊCH   |
+//+------------------------------------------------------------------+
+void DrawOrderPinsAndTradingJournal(int openCount, double vwapEntry, bool basketIsLong)
+  {
+   if(!g_showJournal)
+ 	{
+      ObjectsDeleteAll(0, JRN_PREFIX);
+  	return;
+ 	}
+ 
+   // 1. VẼ TÂM NGẮM & NHÃN CHI TIẾT CHO TỪNG LỆNH ĐANG MỞ TẠI ĐÚNG NẾN VÀO LỆNH
+   ObjectsDeleteAll(0, JRN_PREFIX + "OPEN_");
+   int orderIdx = 0;
+ 
+   for(int i = 0; i < PositionsTotal(); i++)
+ 	{
+  	ulong ticket = PositionGetTicket(i);
+  	if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+     	continue;
+ 
+  	orderIdx++;
+  	datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+  	double   entry    = PositionGetDouble(POSITION_PRICE_OPEN);
+  	double   vol      = PositionGetDouble(POSITION_VOLUME);
+  	double   sl       = PositionGetDouble(POSITION_SL);
+  	double   tp       = PositionGetDouble(POSITION_TP);
+  	long 	posId    = PositionGetInteger(POSITION_IDENTIFIER);
+  	bool 	isBuy    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+ 
+  	int  	barShift = iBarShift(_Symbol, PERIOD_CURRENT, openTime, false);
+  	datetime exactBar = (barShift >= 0) ? iTime(_Symbol, PERIOD_CURRENT, barShift) : openTime;
+  	color	pinClr   = isBuy ? clrDeepSkyBlue : clrHotPink;
+ 
+  	// Ghi file CSV 1 lần khi phát hiện lệnh mới mở
+  	string gvLoggedOpen = "EAP82_JRN_OPEN_" + IntegerToString(posId);
+      if(!GlobalVariableCheck(gvLoggedOpen))
+    	{
+         WriteTradeJournalCsvRow("VAO_LENH", ticket, isBuy ? "BUY" : "SELL", vol, entry, sl, tp, 0.0, 0.0, 0.0,
+                             	"Khung " + GetTfShortName(g_resolvedAtrTf));
+         GlobalVariableSet(gvLoggedOpen, 1.0);
+    	}
+ 
+  	// 1A. Vạch gióng dọc đứt nét ngay tại đúng cây nến vào lệnh (từ SL đến TP)
+  	string vlineName = JRN_PREFIX + "OPEN_VL_" + IntegerToString(ticket);
+  	double topP  	= (sl > 0.0 && tp > 0.0) ? MathMax(sl, tp) : (entry + 150 * _Point);
+  	double botP  	= (sl > 0.0 && tp > 0.0) ? MathMin(sl, tp) : (entry - 150 * _Point);
+  	ObjectCreate(0, vlineName, OBJ_TREND, 0, exactBar, botP, exactBar, topP);
+      ObjectSetInteger(0, vlineName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, vlineName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, vlineName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, vlineName, OBJPROP_COLOR, pinClr);
+      ObjectSetInteger(0, vlineName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, vlineName, OBJPROP_STYLE, STYLE_DOT);
+ 
+  	// 1B. Tâm ngắm (⦿) ghim chính xác tại (Cây nến vào lệnh, Mức giá mở lệnh)
+  	string pinName = JRN_PREFIX + "OPEN_PIN_" + IntegerToString(ticket);
+  	ObjectCreate(0, pinName, OBJ_TEXT, 0, exactBar, entry);
+      ObjectSetString(0, pinName, OBJPROP_FONT, "Segoe UI Bold");
+      ObjectSetInteger(0, pinName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, pinName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, pinName, OBJPROP_FONTSIZE, InpFontSize + 2);
+      ObjectSetInteger(0, pinName, OBJPROP_COLOR, clrYellow);
+      ObjectSetString(0, pinName, OBJPROP_TEXT, "⦿");
+ 
+  	// 1C. Nhãn thông tin chi tiết của từng lệnh ngay tại cây nến vào lệnh
+  	string lblName = JRN_PREFIX + "OPEN_TXT_" + IntegerToString(ticket);
+  	string timeStr = TimeToString(openTime, TIME_MINUTES);
+  	string pinText = StringFormat("  ▶ #%d %s %.2f @%s [%s | %s]",
+                                	orderIdx, (isBuy ? "BUY" : "SELL"), vol,
+                                    DoubleToString(entry, _Digits), timeStr, GetTfShortName(g_resolvedAtrTf));
+  	ObjectCreate(0, lblName, OBJ_TEXT, 0, exactBar, entry);
+      ObjectSetString(0, lblName, OBJPROP_FONT, "Segoe UI Bold");
+      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, isBuy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, lblName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, MathMax(8, InpFontSize - 1));
+      ObjectSetInteger(0, lblName, OBJPROP_COLOR, clrYellow);
+      ObjectSetString(0, lblName, OBJPROP_TEXT, pinText);
+ 
+  	// 1D. Nếu có nhiều lệnh trong chế độ VWAP, vẽ đường nối từ điểm vào từng lệnh đến đường VWAP chung
+  	if(openCount > 1 && g_multiMode == MULTI_BASKET_VWAP && MathAbs(entry - vwapEntry) > _Point)
+    	{
+     	string linkName = JRN_PREFIX + "OPEN_LNK_" + IntegerToString(ticket);
+     	datetime bar0   = iTime(_Symbol, PERIOD_CURRENT, 0);
+         ObjectCreate(0, linkName, OBJ_TREND, 0, exactBar, entry, bar0, vwapEntry);
+         ObjectSetInteger(0, linkName, OBJPROP_RAY_RIGHT, false);
+         ObjectSetInteger(0, linkName, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, linkName, OBJPROP_COLOR, pinClr);
+         ObjectSetInteger(0, linkName, OBJPROP_STYLE, STYLE_DOT);
+    	}
+ 	}
+ 
+   // 2. VẼ LỊCH SỬ CÁC LỆNH ĐÃ ĐÓNG / CẮT 50% TRONG N NGÀY GẦN NHẤT ĐỂ GHI NHẬT KÝ GIAO DỊCH
+   datetime now  = TimeCurrent();
+   datetime from = now - MathMax(1, InpJournalHistoryDays) * 86400;
+   if(!HistorySelect(from, now + 60))
+  	return;
+ 
+   int totalDeals = HistoryDealsTotal();
+   for(int d = 0; d < totalDeals; d++)
+ 	{
+  	ulong dealTicket = HistoryDealGetTicket(d);
+  	if(dealTicket == 0 || HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol)
+     	continue;
+ 
+  	long entryType = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+  	if(entryType != DEAL_ENTRY_OUT && entryType != DEAL_ENTRY_INOUT && entryType != DEAL_ENTRY_OUT_BY)
+     	continue;
+ 
+  	long 	posId     = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+  	datetime outTime   = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+  	double   outPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+  	double   outVol    = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+  	long 	dealType  = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+  	bool 	wasBuyPos = (dealType == DEAL_TYPE_SELL); // Đóng lệnh Buy thì Deal Out là Sell
+  	double   netCash   = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                         + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION)
+                         + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+                         + HistoryDealGetDouble(dealTicket, DEAL_FEE);
+ 
+  	// Tìm Deal IN tương ứng của posId để vẽ đường nối từ Điểm Vào -> Điểm Ra
+  	datetime inTime  = 0;
+  	double   inPrice = 0.0;
+  	for(int k = 0; k < d; k++)
+    	{
+     	ulong prevDeal = HistoryDealGetTicket(k);
+     	if(prevDeal > 0 && HistoryDealGetInteger(prevDeal, DEAL_POSITION_ID) == posId &&
+            HistoryDealGetInteger(prevDeal, DEAL_ENTRY) == DEAL_ENTRY_IN)
+       	{
+            inTime  = (datetime)HistoryDealGetInteger(prevDeal, DEAL_TIME);
+        	inPrice = HistoryDealGetDouble(prevDeal, DEAL_PRICE);
+        	break;
+       	}
+    	}
+ 
+  	double ptsDiff = 0.0;
+  	if(inPrice > 0.0 && _Point > 0.0)
+     	ptsDiff = (wasBuyPos ? (outPrice - inPrice) : (inPrice - outPrice)) / _Point;
+ 
+  	// Ghi tự động vào file CSV Nhật ký giao dịch 1 lần cho mỗi Deal Out mới
+  	string gvDealLogged = "EAP82_JRN_DEAL_" + IntegerToString(dealTicket);
+      if(!GlobalVariableCheck(gvDealLogged))
+    	{
+         WriteTradeJournalCsvRow("DONG_LENH", dealTicket, wasBuyPos ? "BUY" : "SELL", outVol, inPrice, 0.0, 0.0, outPrice,
+                             	ptsDiff, netCash, (netCash >= 0.0 ? "CHOT_LOI" : "CAT_LO"));
+         GlobalVariableSet(gvDealLogged, 1.0);
+    	}
+ 
+  	int  	outShift = iBarShift(_Symbol, PERIOD_CURRENT, outTime, false);
+  	datetime outBar   = (outShift >= 0) ? iTime(_Symbol, PERIOD_CURRENT, outShift) : outTime;
+  	color	resClr   = (netCash >= 0.0) ? clrLime : clrTomato;
+ 
+  	// Vẽ đường nối hành trình lệnh (IN -> OUT)
+  	if(inTime > 0 && inPrice > 0.0)
+    	{
+     	int  	inShift  = iBarShift(_Symbol, PERIOD_CURRENT, inTime, false);
+     	datetime inBar	= (inShift >= 0) ? iTime(_Symbol, PERIOD_CURRENT, inShift) : inTime;
+     	string   pathName = JRN_PREFIX + "HIST_PATH_" + IntegerToString(dealTicket);
+         if(ObjectFind(0, pathName) < 0)
+       	{
+            ObjectCreate(0, pathName, OBJ_TREND, 0, inBar, inPrice, outBar, outPrice);
+            ObjectSetInteger(0, pathName, OBJPROP_RAY_RIGHT, false);
+            ObjectSetInteger(0, pathName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, pathName, OBJPROP_COLOR, resClr);
+            ObjectSetInteger(0, pathName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, pathName, OBJPROP_STYLE, STYLE_DOT);
+       	}
+ 
+     	string inPin = JRN_PREFIX + "HIST_IN_" + IntegerToString(dealTicket);
+         if(ObjectFind(0, inPin) < 0)
+       	{
+            ObjectCreate(0, inPin, OBJ_TEXT, 0, inBar, inPrice);
+            ObjectSetString(0, inPin, OBJPROP_FONT, "Segoe UI Bold");
+            ObjectSetInteger(0, inPin, OBJPROP_ANCHOR, ANCHOR_CENTER);
+            ObjectSetInteger(0, inPin, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, inPin, OBJPROP_FONTSIZE, InpFontSize);
+            ObjectSetInteger(0, inPin, OBJPROP_COLOR, clrAqua);
+            ObjectSetString(0, inPin, OBJPROP_TEXT, wasBuyPos ? "▲" : "▼");
+       	}
+    	}
+ 
+  	// Vẽ huy hiệu Điểm Ra (🏁 OUT) kèm kết quả Points, Tiền $ và Giờ đóng lệnh
+  	string outBadge = JRN_PREFIX + "HIST_OUT_" + IntegerToString(dealTicket);
+  	if(ObjectFind(0, outBadge) < 0)
+    	{
+     	string outTxt = StringFormat("🏁 OUT %.2f @%s [%+.0f pts | %+$%.2f | %s]",
+                                  	outVol, DoubleToString(outPrice, _Digits), ptsDiff, netCash, TimeToString(outTime, TIME_MINUTES));
+         ObjectCreate(0, outBadge, OBJ_TEXT, 0, outBar, outPrice);
+         ObjectSetString(0, outBadge, OBJPROP_FONT, "Segoe UI Bold");
+         ObjectSetInteger(0, outBadge, OBJPROP_ANCHOR, ANCHOR_LEFT);
+         ObjectSetInteger(0, outBadge, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, outBadge, OBJPROP_FONTSIZE, MathMax(8, InpFontSize - 1));
+         ObjectSetInteger(0, outBadge, OBJPROP_COLOR, resClr);
+         ObjectSetString(0, outBadge, OBJPROP_TEXT, outTxt);
+    	}
+ 	}
+  }
+ 
+//+------------------------------------------------------------------+
+//| CÔNG THỨC TÍNH ATR ĐA KHUNG & VẼ ĐẦY ĐỦ 3 TẦNG (T1 - T2 - T3)	|
+//+------------------------------------------------------------------+
+void DrawTrendSeg(string name, datetime t1, double p1, datetime t2, double p2, color clr, int width, ENUM_LINE_STYLE style = STYLE_SOLID)
+  {
+   string obj = VIS_PREFIX + name;
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_TREND, 0, t1, p1, t2, p2);
+      ObjectSetInteger(0, obj, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, obj, OBJPROP_BACK, false);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 0, t1);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 0, p1);
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 1, t2);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 1, p2);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, obj, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, obj, OBJPROP_STYLE, style);
+  }
+ 
+void DrawVisZone(string name, datetime t1, datetime t2, double p1, double p2, color rawClr, double alphaPct, bool show)
+  {
+   string obj = VIS_PREFIX + name;
+   if(!show || p1 <= 0.0 || p2 <= 0.0 || MathAbs(p1 - p2) < _Point * 0.5)
+ 	{
+  	ObjectDelete(0, obj);
+  	return;
+ 	}
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_RECTANGLE, 0, t1, p1, t2, p2);
+      ObjectSetInteger(0, obj, OBJPROP_FILL, true);
+      ObjectSetInteger(0, obj, OBJPROP_BACK, true);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+ 	}
+   color blended = BlendWithBg(rawClr, alphaPct);
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 0, t1);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 0, p1);
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 1, t2);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 1, p2);
+   ObjectSetInteger(0, obj, OBJPROP_BGCOLOR, blended);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, blended);
+  }
+ 
+void DrawMarkerSymbol(string name, datetime t, double price, string sym, color clr, int fontSizeOffset = 1)
+  {
+   string obj = VIS_PREFIX + name;
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_TEXT, 0, t, price);
+      ObjectSetString(0, obj, OBJPROP_FONT, "Segoe UI Bold");
+      ObjectSetInteger(0, obj, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 0, t);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 0, price);
+   ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, InpFontSize + fontSizeOffset);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+   ObjectSetString(0, obj, OBJPROP_TEXT, sym);
+  }
+ 
+//+------------------------------------------------------------------+
+//| Vẽ 3 Vạch T1-T2-T3 Ở KHOẢNG TRỐNG BÊN PHẢI NẾN HIỆN TẠI (bar0+1) |
+//+------------------------------------------------------------------+
+void DrawCurrentAtrSpotlight(double currentTrailPrice, double ref1RDist, ENUM_TRADE_SIDE sideParam,
+                             int openOrders, double currentBrokerSL, bool isViolated, double currentR, bool isTrailArmed)
+  {
+   string t1Ray   = VIS_PREFIX + "SPOT_RAY";
+   string t1Badge = VIS_PREFIX + "SPOT_BADGE";
+   string t1Tag   = VIS_PREFIX + "SPOT_TAG";
+ 
+   string t2Ray   = VIS_PREFIX + "SPOT_T2_RAY";
+   string t2Badge = VIS_PREFIX + "SPOT_T2_BADGE";
+   string t2Tag   = VIS_PREFIX + "SPOT_T2_TAG";
+ 
+   string t3Ray   = VIS_PREFIX + "SPOT_T3_RAY";
+   string t3Badge = VIS_PREFIX + "SPOT_T3_BADGE";
+   string t3Tag   = VIS_PREFIX + "SPOT_T3_TAG";
+ 
+   if(!g_showAtrPlot || currentTrailPrice <= 0.0)
+ 	{
+  	ObjectDelete(0, t1Ray); ObjectDelete(0, t1Badge); ObjectDelete(0, t1Tag);
+  	ObjectDelete(0, t2Ray); ObjectDelete(0, t2Badge); ObjectDelete(0, t2Tag);
+  	ObjectDelete(0, t3Ray); ObjectDelete(0, t3Badge); ObjectDelete(0, t3Tag);
+      DrawVisZone("Z_T1_T2", 0, 0, 0, 0, clrNONE, 0, false);
+      DrawVisZone("Z_T2_T3", 0, 0, 0, 0, clrNONE, 0, false);
+  	return;
+ 	}
+ 
+   datetime bar0   = iTime(_Symbol, PERIOD_CURRENT, 0);
+   int  	sec    = PeriodSeconds(PERIOD_CURRENT);
+   // Phóng 3 vạch Tầng 1-2-3 từ nến hiện tại (bar0) sang khoảng lề trống bên phải (bar0 + 14 nến)
+   // nhờ đó KHÔNG BAO GIỜ chạm vào hộp SL/TP (vốn kết thúc tại bar0)!
+   datetime tStart = bar0 + sec * 1;
+   datetime tEnd   = bar0 + sec * 15;
+   string   tfName = GetTfShortName(g_resolvedAtrTf);
+ 
+   // 1. VẠCH TẦNG 1 (ATR TRAIL THEO KHUNG ĐÃ KHÓA)
+   if(ObjectFind(0, t1Ray) < 0)
+ 	{
+  	ObjectCreate(0, t1Ray, OBJ_TREND, 0, bar0, currentTrailPrice, tEnd, currentTrailPrice);
+      ObjectSetInteger(0, t1Ray, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, t1Ray, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, t1Ray, OBJPROP_TIME, 0, bar0);
+   ObjectSetDouble(0, t1Ray, OBJPROP_PRICE, 0, currentTrailPrice);
+   ObjectSetInteger(0, t1Ray, OBJPROP_TIME, 1, tEnd);
+   ObjectSetDouble(0, t1Ray, OBJPROP_PRICE, 1, currentTrailPrice);
+   ObjectSetInteger(0, t1Ray, OBJPROP_COLOR, C_TIER1_RAY);
+   ObjectSetInteger(0, t1Ray, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, t1Ray, OBJPROP_STYLE, STYLE_SOLID);
+ 
+   if(ObjectFind(0, t1Badge) < 0)
+ 	{
+  	ObjectCreate(0, t1Badge, OBJ_ARROW_RIGHT_PRICE, 0, tEnd, currentTrailPrice);
+      ObjectSetInteger(0, t1Badge, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, t1Badge, OBJPROP_TIME, 0, tEnd);
+   ObjectSetDouble(0, t1Badge, OBJPROP_PRICE, 0, currentTrailPrice);
+   ObjectSetInteger(0, t1Badge, OBJPROP_COLOR, C_TIER1_RAY);
+ 
+   double liveClose = iClose(_Symbol, PERIOD_CURRENT, 0);
+   double distPts   = (_Point > 0.0) ? (MathAbs(liveClose - currentTrailPrice) / _Point) : 0.0;
+ 
+   string t1Text = StringFormat("🎯 T1 [ATR %s: %s | %.0f pts] Rút râu=Giữ (%d💧)",
+                            	tfName, DoubleToString(currentTrailPrice, _Digits), distPts, g_tier1SavedCount);
+ 
+   if(ObjectFind(0, t1Tag) < 0)
+ 	{
+  	ObjectCreate(0, t1Tag, OBJ_TEXT, 0, tStart, currentTrailPrice);
+      ObjectSetString(0, t1Tag, OBJPROP_FONT, "Segoe UI Bold");
+      ObjectSetInteger(0, t1Tag, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, t1Tag, OBJPROP_ANCHOR, (sideParam == SIDE_LONG) ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(0, t1Tag, OBJPROP_TIME, 0, tStart);
+   ObjectSetDouble(0, t1Tag, OBJPROP_PRICE, 0, currentTrailPrice);
+   ObjectSetInteger(0, t1Tag, OBJPROP_FONTSIZE, MathMax(8, InpFontSize - 1));
+   ObjectSetInteger(0, t1Tag, OBJPROP_COLOR, (g_enTrail && isTrailArmed) ? clrLime : C_TIER1_RAY);
+   ObjectSetString(0, t1Tag, OBJPROP_TEXT, t1Text);
+ 
+   // 2. VẠCH TẦNG 2 (10% 1R - CẮT 50%) & VẠCH TẦNG 3 (20% 1R - HARD SL 100%)
+   double base1R    	= (ref1RDist > 0.0) ? ref1RDist : ((g_pineFirstBarSlDist > 0.0) ? g_pineFirstBarSlDist : (g_pineLatestAtr * g_customValueForFirstDay));
+   double buffer20Pct1R = base1R * (g_tierPctOf1R / 100.0);
+   double buffer10Pct1R = buffer20Pct1R * 0.5;
+ 
+   if(g_sweepMode == SWEEP_3LAYER_20PCT_1R && buffer20Pct1R > 0.0)
+ 	{
+  	double tier2Price = (sideParam == SIDE_LONG) ? NormalizeDouble(currentTrailPrice - buffer10Pct1R, _Digits)
+                                                   : NormalizeDouble(currentTrailPrice + buffer10Pct1R, _Digits);
+  	double tier3Price = (sideParam == SIDE_LONG) ? NormalizeDouble(currentTrailPrice - buffer20Pct1R, _Digits)
+                                                   : NormalizeDouble(currentTrailPrice + buffer20Pct1R, _Digits);
+ 
+  	double t2Pts = (_Point > 0.0) ? (buffer10Pct1R / _Point) : 0.0;
+  	double t3Pts = (_Point > 0.0) ? (buffer20Pct1R / _Point) : 0.0;
+ 
+      DrawVisZone("Z_T1_T2", bar0, tEnd, currentTrailPrice, tier2Price, C_TIER2_RAY, 10.0, true);
+      DrawVisZone("Z_T2_T3", bar0, tEnd, tier2Price,    	tier3Price, C_TIER3_RAY, 14.0, true);
+ 
+  	// --- VẠCH TẦNG 2 ---
+  	if(ObjectFind(0, t2Ray) < 0)
+    	{
+         ObjectCreate(0, t2Ray, OBJ_TREND, 0, bar0, tier2Price, tEnd, tier2Price);
+         ObjectSetInteger(0, t2Ray, OBJPROP_RAY_RIGHT, false);
+         ObjectSetInteger(0, t2Ray, OBJPROP_SELECTABLE, false);
+    	}
+      ObjectSetInteger(0, t2Ray, OBJPROP_TIME, 0, bar0);
+      ObjectSetDouble(0, t2Ray, OBJPROP_PRICE, 0, tier2Price);
+      ObjectSetInteger(0, t2Ray, OBJPROP_TIME, 1, tEnd);
+      ObjectSetDouble(0, t2Ray, OBJPROP_PRICE, 1, tier2Price);
+      ObjectSetInteger(0, t2Ray, OBJPROP_COLOR, C_TIER2_RAY);
+      ObjectSetInteger(0, t2Ray, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, t2Ray, OBJPROP_STYLE, STYLE_DASH);
+ 
+  	if(ObjectFind(0, t2Badge) < 0)
+    	{
+         ObjectCreate(0, t2Badge, OBJ_ARROW_RIGHT_PRICE, 0, tEnd, tier2Price);
+         ObjectSetInteger(0, t2Badge, OBJPROP_SELECTABLE, false);
+    	}
+      ObjectSetInteger(0, t2Badge, OBJPROP_TIME, 0, tEnd);
+      ObjectSetDouble(0, t2Badge, OBJPROP_PRICE, 0, tier2Price);
+      ObjectSetInteger(0, t2Badge, OBJPROP_COLOR, C_TIER2_RAY);
+ 
+  	string t2Text = StringFormat("◐ T2 [CẮT 50%%: %s | %.0f%% 1R=%.0f pts] Đóng nến %s (%d◐)",
+                                   DoubleToString(tier2Price, _Digits), g_tierPctOf1R * 0.5, t2Pts, tfName, g_tier2HalfCutCount);
+  	if(ObjectFind(0, t2Tag) < 0)
+    	{
+         ObjectCreate(0, t2Tag, OBJ_TEXT, 0, tStart, tier2Price);
+         ObjectSetString(0, t2Tag, OBJPROP_FONT, "Segoe UI Bold");
+         ObjectSetInteger(0, t2Tag, OBJPROP_ANCHOR, ANCHOR_LEFT);
+         ObjectSetInteger(0, t2Tag, OBJPROP_SELECTABLE, false);
+    	}
+      ObjectSetInteger(0, t2Tag, OBJPROP_TIME, 0, tStart);
+      ObjectSetDouble(0, t2Tag, OBJPROP_PRICE, 0, tier2Price);
+      ObjectSetInteger(0, t2Tag, OBJPROP_FONTSIZE, MathMax(8, InpFontSize - 1));
+      ObjectSetInteger(0, t2Tag, OBJPROP_COLOR, C_TIER2_RAY);
+      ObjectSetString(0, t2Tag, OBJPROP_TEXT, t2Text);
+ 
+  	// --- VẠCH TẦNG 3 ---
+  	if(ObjectFind(0, t3Ray) < 0)
+    	{
+         ObjectCreate(0, t3Ray, OBJ_TREND, 0, bar0, tier3Price, tEnd, tier3Price);
+         ObjectSetInteger(0, t3Ray, OBJPROP_RAY_RIGHT, false);
+         ObjectSetInteger(0, t3Ray, OBJPROP_SELECTABLE, false);
+    	}
+      ObjectSetInteger(0, t3Ray, OBJPROP_TIME, 0, bar0);
+      ObjectSetDouble(0, t3Ray, OBJPROP_PRICE, 0, tier3Price);
+      ObjectSetInteger(0, t3Ray, OBJPROP_TIME, 1, tEnd);
+      ObjectSetDouble(0, t3Ray, OBJPROP_PRICE, 1, tier3Price);
+      ObjectSetInteger(0, t3Ray, OBJPROP_COLOR, C_TIER3_RAY);
+      ObjectSetInteger(0, t3Ray, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, t3Ray, OBJPROP_STYLE, STYLE_DOT);
+ 
+  	if(ObjectFind(0, t3Badge) < 0)
+    	{
+         ObjectCreate(0, t3Badge, OBJ_ARROW_RIGHT_PRICE, 0, tEnd, tier3Price);
+         ObjectSetInteger(0, t3Badge, OBJPROP_SELECTABLE, false);
+    	}
+      ObjectSetInteger(0, t3Badge, OBJPROP_TIME, 0, tEnd);
+      ObjectSetDouble(0, t3Badge, OBJPROP_PRICE, 0, tier3Price);
+      ObjectSetInteger(0, t3Badge, OBJPROP_COLOR, C_TIER3_RAY);
+ 
+  	string t3Text = StringFormat("🛡 T3 [SL 100%%: %s | %.0f%% 1R=%.0f pts] Thủng=SL Luôn!",
+                                   DoubleToString(tier3Price, _Digits), g_tierPctOf1R, t3Pts);
+  	if(ObjectFind(0, t3Tag) < 0)
+    	{
+         ObjectCreate(0, t3Tag, OBJ_TEXT, 0, tStart, tier3Price);
+         ObjectSetString(0, t3Tag, OBJPROP_FONT, "Segoe UI Bold");
+         ObjectSetInteger(0, t3Tag, OBJPROP_SELECTABLE, false);
+    	}
+      ObjectSetInteger(0, t3Tag, OBJPROP_ANCHOR, (sideParam == SIDE_LONG) ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, t3Tag, OBJPROP_TIME, 0, tStart);
+      ObjectSetDouble(0, t3Tag, OBJPROP_PRICE, 0, tier3Price);
+      ObjectSetInteger(0, t3Tag, OBJPROP_FONTSIZE, MathMax(8, InpFontSize - 1));
+      ObjectSetInteger(0, t3Tag, OBJPROP_COLOR, C_TIER3_RAY);
+      ObjectSetString(0, t3Tag, OBJPROP_TEXT, t3Text);
+ 	}
+   else
+ 	{
+  	ObjectDelete(0, t2Ray); ObjectDelete(0, t2Badge); ObjectDelete(0, t2Tag);
+  	ObjectDelete(0, t3Ray); ObjectDelete(0, t3Badge); ObjectDelete(0, t3Tag);
+      DrawVisZone("Z_T1_T2", 0, 0, 0, 0, clrNONE, 0, false);
+      DrawVisZone("Z_T2_T3", 0, 0, 0, 0, clrNONE, 0, false);
+ 	}
+  }
+ 
+void ComputeExactPineAtrArray(const MqlRates &rates[], int total, int length, double &outAtr[])
+  {
+   ArrayResize(outAtr, total);
+   ArrayInitialize(outAtr, 0.0);
+   if(total <= 0)
+  	return;
+ 
+   int len = MathMax(1, length);
+   double sumTR = 0.0;
+ 
+   for(int i = 0; i < total; i++)
+ 	{
+  	double high_i = rates[i].high;
+  	double low_i  = rates[i].low;
+  	double tr 	= high_i - low_i;
+ 
+  	if(i > 0)
+    	{
+     	double prevClose = rates[i - 1].close;
+     	double trHC  	= MathAbs(high_i - prevClose);
+     	double trLC  	= MathAbs(low_i  - prevClose);
+     	if(trHC > tr) tr = trHC;
+     	if(trLC > tr) tr = trLC;
+    	}
+ 
+  	if(i < len - 1)
+    	{
+     	sumTR += tr;
+     	outAtr[i] = sumTR / (double)(i + 1);
+    	}
+  	else if(i == len - 1)
+    	{
+     	sumTR += tr;
+     	outAtr[i] = sumTR / (double)len;
+    	}
+  	else
+    	{
+     	outAtr[i] = (outAtr[i - 1] * (double)(len - 1) + tr) / (double)len;
+    	}
+ 	}
+  }
+ 
+//+------------------------------------------------------------------+
+//| THUẬT TOÁN ATR TRAILING CHẠY TRÊN KHUNG ĐÃ KHÓA & QUA NGÀY MỚI   |
+//+------------------------------------------------------------------+
+double ExecuteExactPineScriptFormula(ENUM_TIMEFRAMES calcTf,
+                                 	datetime entryDate,
+                                     double   entryPriceParam,
+                                     ENUM_TRADE_SIDE sideParam,
+                                 	bool 	drawPlotOnChart,
+                                 	bool 	allowAutoRestart,
+                                     double   &outEntryLevel,
+                                     double   &outFirstBarSlDist,
+                                 	bool 	&outStopPlotting,
+                                 	bool 	&outStartCalculating)
+  {
+   outEntryLevel   	= 0.0;
+   outFirstBarSlDist   = 0.0;
+   outStopPlotting 	= false;
+   outStartCalculating = false;
+ 
+   datetime pingTfBar0 = iTime(_Symbol, calcTf, 0);
+   double   pingClose0 = iClose(_Symbol, calcTf, 0);
+   if(pingTfBar0 <= 0 || pingClose0 <= 0.0)
+ 	{ /* kích hoạt tải dữ liệu nền */ }
+ 
+   int anchorShift = iBarShift(_Symbol, calcTf, entryDate, false);
+   if(anchorShift < 0)
+  	anchorShift = 0;
+ 
+   int visualShift = MathMax(anchorShift, 60);
+   int barsToCopy  = MathMin(visualShift + g_atrLength * 8 + 120, 5000);
+   barsToCopy  	= MathMax(barsToCopy, g_atrLength * 4 + 80);
+ 
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   int copied = CopyRates(_Symbol, calcTf, 0, barsToCopy, rates);
+   if(copied <= 0)
+  	return 0.0;
+ 
+   double atrArr[];
+   ComputeExactPineAtrArray(rates, copied, g_atrLength, atrArr);
+ 
+   g_pineLatestAtr = (copied >= 2) ? atrArr[copied - 2] : atrArr[copied - 1];
+ 
+   if(drawPlotOnChart)
+ 	{
+      ObjectsDeleteAll(0, VIS_PREFIX + "ATRLINE_");
+      g_tier1SavedCount   = 0;
+      g_tier2HalfCutCount = 0;
+ 	}
+ 
+   int anchorIdx = copied - 1 - anchorShift;
+   if(anchorIdx < 0)   	anchorIdx = 0;
+   if(anchorIdx >= copied) anchorIdx = copied - 1;
+   datetime effectiveEntryDate = rates[anchorIdx].time;
+ 
+   bool 	hasEntryLevel   	= false;
+   double   entryLevel      	= 0.0;
+   bool 	hasPrevTrailing 	= false;
+   double   prevTrailingStop	= 0.0;
+   double   trailingStop    	= 0.0;
+   bool 	firstDayCalculated  = false;
+   bool 	stopPlotting    	= false;
+   bool 	tier2TriggeredCycle = false;
+ 
+   datetime prevPlottedTime 	= 0;
+   double   prevPlottedValue	= 0.0;
+   color	plotColor       	= (sideParam == SIDE_LONG) ? C_ATR_LONG : C_ATR_SHORT;
+   datetime chartBar0       	= iTime(_Symbol, PERIOD_CURRENT, 0);
+ 
+   for(int i = 0; i < copied; i++)
+ 	{
+  	datetime barTime   	= rates[i].time;
+  	double   barClose      = rates[i].close;
+  	double   barHigh       = rates[i].high;
+  	double   barLow        = rates[i].low;
+  	double   atrValue      = (i == copied - 1 && i > 0) ? atrArr[i - 1] : atrArr[i];
+  	bool 	isFormingBar0 = (i == copied - 1);
+ 
+      if(!hasEntryLevel && barTime >= effectiveEntryDate)
+    	{
+         entryLevel	= (entryPriceParam > 0.0) ? entryPriceParam : barClose;
+     	hasEntryLevel = true;
+     	outEntryLevel = entryLevel;
+    	}
+ 
+  	bool startCalculating = (hasEntryLevel && barTime >= effectiveEntryDate);
+      if(startCalculating)
+         outStartCalculating = true;
+ 
+      if(startCalculating && !stopPlotting)
+    	{
+         if(!hasPrevTrailing)
+       	{
+            if(sideParam == SIDE_LONG)
+          	{
+               if(!firstDayCalculated)
+             	{ trailingStop = entryLevel - atrValue * g_customValueForFirstDay; firstDayCalculated = true; }
+           	else
+                  trailingStop = entryLevel - g_atrMultiplier * atrValue;
+          	}
+        	else
+          	{
+               if(!firstDayCalculated)
+             	{ trailingStop = entryLevel + atrValue * g_customValueForFirstDay; firstDayCalculated = true; }
+           	else
+                  trailingStop = entryLevel + g_atrMultiplier * atrValue;
+          	}
+            outFirstBarSlDist   = MathAbs(entryLevel - trailingStop);
+            tier2TriggeredCycle = false;
+       	}
+     	else
+       	{
+            if(g_atrSource == ATR_SRC_CLOSE_SWING)
+          	{
+               if(isFormingBar0)
+             	{
+                  trailingStop = prevTrailingStop;
+             	}
+           	else
+             	{
+                  if(sideParam == SIDE_LONG)
+                	{
+                     double newStop = barClose - g_atrMultiplier * atrValue;
+ 
+                     double lowestRecent = barLow;
+                     for(int k = 1; k <= g_swingLookback && (i - k) >= 0; k++)
+                        if(rates[i - k].low < lowestRecent)
+                           lowestRecent = rates[i - k].low;
+ 
+                     double swingCap = lowestRecent - atrValue * 0.25;
+                     if(newStop > swingCap && barClose > lowestRecent)
+                        newStop = MathMin(newStop, lowestRecent - _Point * 10);
+ 
+                     trailingStop = MathMax(prevTrailingStop, newStop);
+                	}
+              	else
+                	{
+                     double newStop = barClose + g_atrMultiplier * atrValue;
+ 
+                     double highestRecent = barHigh;
+                     for(int k = 1; k <= g_swingLookback && (i - k) >= 0; k++)
+                        if(rates[i - k].high > highestRecent)
+                           highestRecent = rates[i - k].high;
+ 
+                     double swingCap = highestRecent + atrValue * 0.25;
+                     if(newStop < swingCap && barClose < highestRecent)
+                        newStop = MathMax(newStop, highestRecent + _Point * 10);
+ 
+                     trailingStop = MathMin(prevTrailingStop, newStop);
+                	}
+             	}
+          	}
+        	else
+          	{
+               if(sideParam == SIDE_LONG)
+             	{
+                  double newStop = barHigh - g_atrMultiplier * atrValue;
+                  trailingStop   = MathMax(prevTrailingStop, newStop);
+             	}
+           	else
+             	{
+                  double newStop = barLow + g_atrMultiplier * atrValue;
+                  trailingStop   = MathMin(prevTrailingStop, newStop);
+             	}
+          	}
+       	}
+ 
+     	double ref1R      	= (outFirstBarSlDist > 0.0) ? outFirstBarSlDist : (atrValue * g_customValueForFirstDay);
+     	double tierBuffer20   = ref1R * (g_tierPctOf1R / 100.0);
+     	bool   tier1WickSaved = false;
+     	bool   tier2HalfCut   = false;
+     	bool   tier3FullBreak = false;
+ 
+         if(hasPrevTrailing)
+       	{
+        	double tier3HardBoundary = (sideParam == SIDE_LONG) ? (prevTrailingStop - tierBuffer20)
+                                                                : (prevTrailingStop + tierBuffer20);
+ 
+            if(g_sweepMode == SWEEP_3LAYER_20PCT_1R)
+          	{
+               if(sideParam == SIDE_LONG)
+             	{
+                  if(barLow <= tier3HardBoundary)
+                     tier3FullBreak = true;
+              	else if(!isFormingBar0)
+                	{
+                     if(barLow < prevTrailingStop && barClose >= prevTrailingStop)
+                        tier1WickSaved = true;
+                     else if(barClose < prevTrailingStop && barClose > tier3HardBoundary)
+                       {
+                        if(!tier2TriggeredCycle)
+                          { tier2HalfCut = true; tier2TriggeredCycle = true; }
+                        else
+                           tier3FullBreak = true;
+                       }
+                	}
+             	}
+           	else
+             	{
+                  if(barHigh >= tier3HardBoundary)
+                     tier3FullBreak = true;
+              	else if(!isFormingBar0)
+                	{
+                     if(barHigh > prevTrailingStop && barClose <= prevTrailingStop)
+                        tier1WickSaved = true;
+                     else if(barClose > prevTrailingStop && barClose < tier3HardBoundary)
+                       {
+                        if(!tier2TriggeredCycle)
+                          { tier2HalfCut = true; tier2TriggeredCycle = true; }
+                        else
+                           tier3FullBreak = true;
+                       }
+                	}
+             	}
+          	}
+        	else if(g_sweepMode == SWEEP_WAIT_CANDLE_CLOSE)
+          	{
+               if(!isFormingBar0)
+             	{
+                  if(sideParam == SIDE_LONG)
+                	{
+                     if(barClose < prevTrailingStop) tier3FullBreak = true;
+                     else if(barLow < prevTrailingStop && barClose >= prevTrailingStop) tier1WickSaved = true;
+                	}
+              	else
+                	{
+                     if(barClose > prevTrailingStop) tier3FullBreak = true;
+                     else if(barHigh > prevTrailingStop && barClose <= prevTrailingStop) tier1WickSaved = true;
+                	}
+             	}
+          	}
+        	else
+          	{
+               if(sideParam == SIDE_LONG && barLow < prevTrailingStop)   tier3FullBreak = true;
+               if(sideParam == SIDE_SHORT && barHigh > prevTrailingStop) tier3FullBreak = true;
+          	}
+       	}
+ 
+         if(tier1WickSaved && drawPlotOnChart)
+       	{
+            g_tier1SavedCount++;
+        	double markP = (sideParam == SIDE_LONG) ? barLow : barHigh;
+            DrawMarkerSymbol("ATRLINE_T1_" + IntegerToString(i), barTime, markP, "💧T1", clrAqua, -1);
+       	}
+ 
+         if(tier2HalfCut && drawPlotOnChart)
+       	{
+            g_tier2HalfCutCount++;
+        	double markP = (sideParam == SIDE_LONG) ? barLow : barHigh;
+            DrawMarkerSymbol("ATRLINE_T2_" + IntegerToString(i), barTime, markP, "◐T2-50%", C_TIER2_RAY, -1);
+       	}
+ 
+         if(tier3FullBreak)
+       	{
+            outStopPlotting = true;
+            if(drawPlotOnChart)
+               DrawMarkerSymbol("ATRLINE_T3_" + IntegerToString(i), barTime, prevTrailingStop, "✖T3", C_TIER3_RAY, 0);
+ 
+            if(allowAutoRestart && i < copied - 1)
+          	{
+               entryLevel      	= barClose;
+               outEntryLevel   	= entryLevel;
+               firstDayCalculated  = true;
+               trailingStop    	= (sideParam == SIDE_LONG) ? (entryLevel - atrValue * g_customValueForFirstDay)
+                                                              : (entryLevel + atrValue * g_customValueForFirstDay);
+               outFirstBarSlDist   = MathAbs(entryLevel - trailingStop);
+               outStopPlotting 	= false;
+               tier2TriggeredCycle = false;
+               prevPlottedTime 	= 0;
+          	}
+        	else
+          	{
+               stopPlotting = true;
+          	}
+       	}
+ 
+         if(!stopPlotting)
+       	{
+            hasPrevTrailing  = true;
+            prevTrailingStop = trailingStop;
+ 
+            if(drawPlotOnChart)
+          	{
+               if(prevPlottedTime > 0)
+             	{
+                  DrawTrendSeg("ATRLINE_H_" + IntegerToString(i), prevPlottedTime, prevPlottedValue, barTime, prevPlottedValue, plotColor, 3);
+                  if(MathAbs(trailingStop - prevPlottedValue) >= _Point * 0.5)
+                     DrawTrendSeg("ATRLINE_V_" + IntegerToString(i), barTime, prevPlottedValue, barTime, trailingStop, plotColor, 2);
+             	}
+           	if(i == copied - 1)
+             	{
+                  datetime endPlotTime = MathMax(barTime, chartBar0);
+                  DrawTrendSeg("ATRLINE_H0", barTime, trailingStop, endPlotTime, trailingStop, plotColor, 3);
+             	}
+               prevPlottedTime  = barTime;
+               prevPlottedValue = trailingStop;
+          	}
+       	}
+    	}
+ 	}
+ 
+   return trailingStop;
+  }
+ 
+//+------------------------------------------------------------------+
+//| KIỂM SOÁT LỖ 3 TẦNG + TỰ ĐỘNG CẬP NHẬT NGÀY MỚI KHI QUA 00:00   |
+//+------------------------------------------------------------------+
+void CalculateDayWeekMonthPnl(double &outDayPnl, double &outDayPct,
+                              double &outWeekPnl, double &outWeekPct,
+                              double &outMonthPnl, double &outMonthPct)
+  {
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+ 
+   if(g_lastDayOfYear != -1 && g_lastDayOfYear != dt.day_of_year)
+ 	{
+  	g_pinExtraDayPct = 0.0;
+  	string restoredCycle = "NGÀY MỚI";
+      if(dt.day_of_week == 1) { g_pinExtraWeekPct  = 0.0; restoredCycle = "TUẦN MỚI"; }
+  	if(dt.day == 1)     	{ g_pinExtraMonthPct = 0.0; restoredCycle = "THÁNG MỚI"; }
+      SaveLockStateToGV();
+ 
+      if(g_autoSyncDate)
+         SyncAnchorDateFields(g_resolvedAtrTf, now);
+ 
+      if(g_wasBreachedPrev && !g_inCooldownLock)
+         NotifyQuotaRestored("KHÔI PHỤC HẠN MỨC " + restoredCycle, "Hạn mức rủi ro đã được làm mới cho chu kỳ giao dịch tiếp theo!");
+ 	}
+   g_lastDayOfYear = dt.day_of_year;
+ 
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime startOfDay = StructToTime(dt);
+ 
+   int daysSinceMonday = (dt.day_of_week == 0) ? 6 : (dt.day_of_week - 1);
+   datetime startOfWeek = startOfDay - daysSinceMonday * 86400;
+ 
+   MqlDateTime dtMonth = dt;
+   dtMonth.day = 1; dtMonth.hour = 0; dtMonth.min = 0; dtMonth.sec = 0;
+   datetime startOfMonth = StructToTime(dtMonth);
+ 
+   double closedDay = 0.0, closedWeek = 0.0, closedMonth = 0.0;
+   datetime earliest = MathMin(startOfMonth, startOfWeek);
+ 
+   if(HistorySelect(earliest, now + 60))
+ 	{
+  	int totalDeals = HistoryDealsTotal();
+  	for(int i = 0; i < totalDeals; i++)
+    	{
+     	ulong dealTicket = HistoryDealGetTicket(i);
+     	if(dealTicket == 0)
+        	continue;
+     	long entryType = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+     	if(entryType != DEAL_ENTRY_OUT && entryType != DEAL_ENTRY_INOUT && entryType != DEAL_ENTRY_OUT_BY)
+        	continue;
+ 
+     	datetime dealTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+     	double   netPnl   = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                           + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION)
+                           + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+                           + HistoryDealGetDouble(dealTicket, DEAL_FEE);
+ 
+     	if(dealTime >= startOfDay)   closedDay   += netPnl;
+     	if(dealTime >= startOfWeek)  closedWeek  += netPnl;
+     	if(dealTime >= startOfMonth) closedMonth += netPnl;
+    	}
+ 	}
+ 
+   double floatingPnl = AccountInfoDouble(ACCOUNT_PROFIT);
+   outDayPnl   = closedDay   + floatingPnl;
+   outWeekPnl  = closedWeek  + floatingPnl;
+   outMonthPnl = closedMonth + floatingPnl;
+ 
+   double eq   = GetEffectiveEquity();
+   outDayPct   = (eq > 0.0) ? (outDayPnl   / eq * 100.0) : 0.0;
+   outWeekPct  = (eq > 0.0) ? (outWeekPnl  / eq * 100.0) : 0.0;
+   outMonthPct = (eq > 0.0) ? (outMonthPnl / eq * 100.0) : 0.0;
+ 
+   double effMaxDay   = g_maxDailyLossPct   + g_pinExtraDayPct;
+   double effMaxWeek  = g_maxWeeklyLossPct  + g_pinExtraWeekPct;
+   double effMaxMonth = g_maxMonthlyLossPct + g_pinExtraMonthPct;
+ 
+   bool rawBreach = false;
+   string rawReason = "";
+ 
+   if(g_enRiskGuard)
+ 	{
+  	if(effMaxDay > 0.0 && outDayPct <= -effMaxDay)
+    	{ rawBreach = true; rawReason = StringFormat("Quá lỗ NGÀY (%.2f%% <= -%.1f%%)", outDayPct, effMaxDay); }
+  	else if(effMaxWeek > 0.0 && outWeekPct <= -effMaxWeek)
+    	{ rawBreach = true; rawReason = StringFormat("Quá lỗ TUẦN (%.2f%% <= -%.1f%%)", outWeekPct, effMaxWeek); }
+  	else if(effMaxMonth > 0.0 && outMonthPct <= -effMaxMonth)
+    	{ rawBreach = true; rawReason = StringFormat("Quá lỗ THÁNG (%.2f%% <= -%.1f%%)", outMonthPct, effMaxMonth); }
+ 	}
+ 
+   if(rawBreach)
+ 	{
+      if(g_breachTimestamp == 0)
+    	{
+         g_breachTimestamp  = now;
+         g_inRecoveryMode   = true;
+         g_recStartMonthPct = outMonthPct;
+         SaveLockStateToGV();
+    	}
+ 	}
+ 
+   g_inCooldownLock = false;
+   g_cooldownRemSec = 0;
+   if(g_enRiskGuard && g_breachTimestamp > 0 && g_cooldownHours > 0.0)
+ 	{
+  	int elapsedSec  = (int)(now - g_breachTimestamp);
+  	int requiredSec = (int)MathRound(g_cooldownHours * 3600.0);
+  	if(elapsedSec < requiredSec)
+    	{
+         g_inCooldownLock = true;
+         g_cooldownRemSec = requiredSec - elapsedSec;
+    	}
+  	else if(!rawBreach)
+    	{
+         g_breachTimestamp  = 0;
+         g_inRecoveryMode   = true;
+         g_recStartMonthPct = outMonthPct;
+         SaveLockStateToGV();
+         NotifyQuotaRestored("HẾT GIỜ HẠ NHIỆT - MỞ KHÓA TÀI KHOẢN",
+                             StringFormat("Tài khoản đã được mở khóa trong CHẾ ĐỘ PHỤC HỒI (Risk: %.2f%%/lệnh). Khi lãi đạt +%.1f%% sẽ khôi phục 100%% hạn mức!",
+                                          GetActiveRiskPercent(), g_recoveryTargetPct));
+    	}
+ 	}
+ 
+   if(g_inRecoveryMode && !rawBreach && !g_inCooldownLock)
+ 	{
+  	double gainedPct = outMonthPct - g_recStartMonthPct;
+  	if(gainedPct >= g_recoveryTargetPct)
+    	{
+         g_inRecoveryMode = false;
+         SaveLockStateToGV();
+         NotifyQuotaRestored("KHÔI PHỤC 100% HẠN MỨC RỦI RO",
+                             StringFormat("Chúc mừng! Bạn đã đạt lợi nhuận phục hồi +%.2f%%. Hạn mức Risk/Lệnh đã được khôi phục về 100%% (%.2f%%)!",
+                                          gainedPct, g_riskPct));
+    	}
+ 	}
+ 
+   g_riskBreached	= (rawBreach || g_inCooldownLock);
+   g_wasBreachedPrev = g_riskBreached;
+ 
+   if(rawBreach)
+ 	{
+      if(g_inCooldownLock)
+    	{
+     	int h = g_cooldownRemSec / 3600;
+     	int m = (g_cooldownRemSec % 3600) / 60;
+         g_breachReason = StringFormat("%s | Hạ nhiệt %02dg:%02dp", rawReason, h, m);
+    	}
+  	else
+         g_breachReason = rawReason;
+ 	}
+   else if(g_inCooldownLock)
+ 	{
+  	int h = g_cooldownRemSec / 3600;
+  	int m = (g_cooldownRemSec % 3600) / 60;
+  	g_breachReason = StringFormat("KHÓA HẠ NHIỆT (Mở sau %02dg:%02dp)", h, m);
+ 	}
+   else
+  	g_breachReason = "";
+  }
+ 
+void TryEmergencyPinUnlock()
+  {
+   string cleanPin = g_enteredPinStr;
+   StringTrimLeft(cleanPin);
+   StringTrimRight(cleanPin);
+ 
+   if(cleanPin != InpUnlockPinCode)
+ 	{
+  	Alert("SAI MÃ PIN! Hãy nhập đúng Mã PIN (Mặc định: ", InpUnlockPinCode, ")");
+  	return;
+ 	}
+ 
+   double dayPnl, dayPct, weekPnl, weekPct, monthPnl, monthPct;
+   CalculateDayWeekMonthPnl(dayPnl, dayPct, weekPnl, weekPct, monthPnl, monthPct);
+ 
+   if(dayPct <= -(g_maxDailyLossPct + g_pinExtraDayPct))
+  	g_pinExtraDayPct = MathAbs(dayPct) - g_maxDailyLossPct + InpPinExtraBufferPct;
+   if(weekPct <= -(g_maxWeeklyLossPct + g_pinExtraWeekPct))
+      g_pinExtraWeekPct = MathAbs(weekPct) - g_maxWeeklyLossPct + InpPinExtraBufferPct;
+   if(monthPct <= -(g_maxMonthlyLossPct + g_pinExtraMonthPct))
+      g_pinExtraMonthPct = MathAbs(monthPct) - g_maxMonthlyLossPct + InpPinExtraBufferPct;
+ 
+   g_breachTimestamp  = 0;
+   g_inCooldownLock   = false;
+   g_riskBreached 	= false;
+   g_manualForceLock  = false;
+   g_inRecoveryMode   = true;
+   g_recStartMonthPct = monthPct;
+   g_enteredPinStr	= "****";
+ 
+   SaveLockStateToGV();
+   RebuildCleanPanel(true);
+   ProcessCoreLogic();
+ 
+   NotifyQuotaRestored("MỞ KHÓA KHẨN CẤP BẰNG PIN (" + InpUnlockPinCode + ")",
+                       StringFormat("Đã cấp thêm +%.1f%% hạn mức dự phòng và bật CHẾ ĐỘ PHỤC HỒI (50%% Risk = %.2f%%/lệnh).",
+                                    InpPinExtraBufferPct, GetActiveRiskPercent()));
+  }
+ 
+//+------------------------------------------------------------------+
+//| LỊCH TIN TỨC LINH HOẠT: BẬT/TẮT ĐỘC LẬP TỪNG TIN (1 HOẶC ĐA TIN) |
+//+------------------------------------------------------------------+
+bool ParseNewsSlotTime(string timeStr, datetime refNow, datetime &outEventTime)
+  {
+   string clean = timeStr;
+   StringTrimLeft(clean);
+   StringTrimRight(clean);
+   if(StringLen(clean) < 4 || StringFind(clean, ":") <= 0 || clean == "00:00" || clean == "0:00" || clean == "0")
+  	return false;
+ 
+   string datePart = TimeToString(refNow, TIME_DATE);
+   outEventTime = StringToTime(datePart + " " + clean);
+   return (outEventTime > 0);
+  }
+ 
+void DrawNewsVerticalLine(string slotName, datetime evServerTime, string labelText, bool isDanger)
+  {
+   string obj = VIS_PREFIX + "NEWS_" + slotName;
+   if(evServerTime <= 0)
+ 	{
+  	ObjectDelete(0, obj);
+  	return;
+ 	}
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_VLINE, 0, evServerTime, 0);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, obj, OBJPROP_BACK, true);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 0, evServerTime);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, isDanger ? clrRed : clrMediumOrchid);
+   ObjectSetInteger(0, obj, OBJPROP_STYLE, isDanger ? STYLE_SOLID : STYLE_DOT);
+   ObjectSetInteger(0, obj, OBJPROP_WIDTH, isDanger ? 2 : 1);
+   ObjectSetString(0, obj, OBJPROP_TEXT, labelText);
+  }
+ 
+bool CheckNewsScheduleAndLock(datetime &outActiveWindowStartServer, datetime &outActiveWindowEndServer)
+  {
+   outActiveWindowStartServer = 0;
+   outActiveWindowEndServer   = 0;
+ 
+   if(!g_enNewsFilter)
+ 	{
+  	g_newsStatusText = "Lọc tin: TẮT";
+      DrawNewsVerticalLine("S1", 0, "", false);
+      DrawNewsVerticalLine("S2", 0, "", false);
+      DrawNewsVerticalLine("S3", 0, "", false);
+  	return false;
+ 	}
+ 
+   datetime serverNow = TimeCurrent();
+   datetime localNow  = TimeLocal();
+   datetime refNow	= (g_newsTz == TZ_LOCAL_PC) ? localNow : serverNow;
+   long 	tzOffset  = (long)(serverNow - localNow);
+ 
+   string slots[3];
+   slots[0] = g_newsSlot1;
+   slots[1] = g_newsSlot2;
+   slots[2] = g_newsSlot3;
+ 
+   bool slotEnabled[3];
+   slotEnabled[0] = g_enSlot1;
+   slotEnabled[1] = g_enSlot2;
+   slotEnabled[2] = g_enSlot3;
+ 
+   int	activeSlotCount   = 0;
+   bool   inForbiddenWindow = false;
+   int	nearestFutureSec  = 999999;
+   string nearestSlotStr	= "";
+   string activeLockStr 	= "";
+ 
+   for(int i = 0; i < 3; i++)
+ 	{
+  	string slotId = "S" + IntegerToString(i + 1);
+  	datetime evTimeRef = 0;
+ 
+      if(!slotEnabled[i] || !ParseNewsSlotTime(slots[i], refNow, evTimeRef))
+    	{
+         DrawNewsVerticalLine(slotId, 0, "", false);
+     	continue;
+    	}
+ 
+      activeSlotCount++;
+  	int diffSec = (int)(evTimeRef - refNow);
+  	bool slotDanger = (diffSec <= g_minBeforeNews * 60 && diffSec >= -g_minAfterNews * 60);
+ 
+  	datetime evServerTime = (g_newsTz == TZ_LOCAL_PC) ? (evTimeRef + (datetime)tzOffset) : evTimeRef;
+      DrawNewsVerticalLine(slotId, evServerTime, "Tin " + IntegerToString(i + 1) + " (" + slots[i] + ")", slotDanger);
+ 
+  	if(slotDanger)
+    	{
+         inForbiddenWindow      	= true;
+         outActiveWindowStartServer = evServerTime - g_minBeforeNews * 60;
+         outActiveWindowEndServer   = evServerTime + g_minAfterNews * 60;
+         activeLockStr          	= "CẤM TRADE: Đang vướng Tin " + IntegerToString(i + 1) + " (" + slots[i] + ")!";
+    	}
+  	else if(diffSec > 0 && diffSec < nearestFutureSec)
+    	{
+         nearestFutureSec = diffSec;
+         nearestSlotStr   = "Tin " + IntegerToString(i + 1) + " (" + slots[i] + ")";
+    	}
+ 	}
+ 
+   if(activeSlotCount == 0)
+  	g_newsStatusText = "Tin: Chưa bật khung giờ";
+   else if(inForbiddenWindow)
+  	g_newsStatusText = activeLockStr;
+   else if(nearestFutureSec < 999999)
+ 	{
+  	int mins = nearestFutureSec / 60;
+  	int secs = nearestFutureSec % 60;
+  	g_newsStatusText = StringFormat("Bật %d tin | Tới %s (%02dp:%02ds)", activeSlotCount, nearestSlotStr, mins, secs);
+ 	}
+   else
+  	g_newsStatusText = StringFormat("Tin (%d khung): An toàn", activeSlotCount);
+ 
+   return inForbiddenWindow;
+  }
+ 
+//+------------------------------------------------------------------+
+//| VẼ THƯỚC SIZER BÁM ĐÚNG CÂY NẾN VÀO LỆNH THỰC TẾ -> NẾN BAR 0	|
+//+------------------------------------------------------------------+
+void DrawSizerHLine(string name, double price, color clr, int width, ENUM_LINE_STYLE style, bool show)
+  {
+   string obj = DRAG_PREFIX + name;
+   if(!show || price <= 0.0)
+ 	{
+  	ObjectDelete(0, obj);
+  	return;
+ 	}
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_HLINE, 0, 0, price);
+      ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, obj, OBJPROP_WIDTH, width);
+      ObjectSetInteger(0, obj, OBJPROP_STYLE, style);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, true);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTED, true);
+      ObjectSetInteger(0, obj, OBJPROP_BACK, false);
+ 	}
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 0, price);
+  }
+ 
+void DrawSizerZone(string name, datetime t1, datetime t2, double p1, double p2, color rawClr, bool show)
+  {
+   string obj = DRAG_PREFIX + name;
+   if(!show || p1 <= 0.0 || p2 <= 0.0 || p1 == p2)
+ 	{
+  	ObjectDelete(0, obj);
+  	return;
+ 	}
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_RECTANGLE, 0, t1, p1, t2, p2);
+      ObjectSetInteger(0, obj, OBJPROP_FILL, true);
+      ObjectSetInteger(0, obj, OBJPROP_BACK, true);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+ 	}
+   color blended = BlendWithBg(rawClr, 14.0);
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 0, t1);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 0, p1);
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 1, t2);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 1, p2);
+   ObjectSetInteger(0, obj, OBJPROP_BGCOLOR, blended);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, blended);
+  }
+ 
+void DrawSizerTag(string name, datetime t, double price, string text, color clr, ENUM_ANCHOR_POINT anchor, bool show)
+  {
+   string obj = DRAG_PREFIX + name;
+   if(!show || price <= 0.0)
+ 	{
+  	ObjectDelete(0, obj);
+  	return;
+ 	}
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_TEXT, 0, t, price);
+      ObjectSetString(0, obj, OBJPROP_FONT, "Segoe UI Bold");
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_ANCHOR, anchor);
+   ObjectSetInteger(0, obj, OBJPROP_TIME, 0, t);
+   ObjectSetDouble(0, obj, OBJPROP_PRICE, 0, price);
+   ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, InpFontSize);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+   ObjectSetString(0, obj, OBJPROP_TEXT, text);
+  }
+ 
+//+------------------------------------------------------------------+
+//| TÍNH VỊ THẾ SIZER & Neo Hộp Rủi Ro Tại Đúng Nến Vào Lệnh Thực Tế |
+//+------------------------------------------------------------------+
+void CalculateSizingAndActiveRules(int  	openOrderCount,
+                               	double   openTotalVol,
+                               	double   openVwapEntry,
+                               	double   openActiveSL,
+                               	double   openActiveTP,
+                               	bool 	openIsLong,
+                               	long 	anchorId,
+                               	datetime earliestOpenTime,
+                               	double   &outSlPriceDist,
+                               	double   &outSlPoints,
+                               	double   &outRecommendedLot,
+                               	double   &outDisplayVol,
+                               	double   &outDisplayRiskCash,
+                               	double   &outDisplayRiskPct,
+                               	double   &outDisplayRewardCash,
+                               	double   &outPartialLot,
+                               	double   &outRemainLot)
+  {
+   double bid	= SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask	= SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+ 
+   int  	pendingCount  = 0;
+   double   pendingEntry  = 0.0, pendingSL = 0.0, pendingTP = 0.0, pendingVol = 0.0;
+   bool 	pendingIsLong = true;
+   datetime pendingTime   = 0;
+   if(openOrderCount == 0)
+ 	{
+  	for(int j = OrdersTotal() - 1; j >= 0; j--)
+    	{
+     	ulong ordTk = OrderGetTicket(j);
+     	if(ordTk > 0 && OrderGetString(ORDER_SYMBOL) == _Symbol)
+       	{
+            pendingCount++;
+            pendingEntry  = OrderGetDouble(ORDER_PRICE_OPEN);
+            pendingSL 	= OrderGetDouble(ORDER_SL);
+            pendingTP 	= OrderGetDouble(ORDER_TP);
+            pendingVol	+= OrderGetDouble(ORDER_VOLUME_CURRENT);
+            pendingTime   = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+        	long oType	= OrderGetInteger(ORDER_TYPE);
+            pendingIsLong = (oType == ORDER_TYPE_BUY_LIMIT || oType == ORDER_TYPE_BUY_STOP || oType == ORDER_TYPE_BUY_STOP_LIMIT);
+       	}
+    	}
+ 	}
+ 
+   bool   isLong = (openOrderCount > 0) ? openIsLong : ((pendingCount > 0) ? pendingIsLong : (g_tradeSide == SIDE_LONG));
+   double live   = isLong ? (ask > 0 ? ask : bid) : (bid > 0 ? bid : ask);
+   if(live <= 0.0)
+  	live = iClose(_Symbol, PERIOD_CURRENT, 0);
+ 
+   double atrValue = (g_pineLatestAtr > 0.0) ? g_pineLatestAtr : (100 * _Point);
+   double sign 	= isLong ? 1.0 : -1.0;
+ 
+   double equity     	= GetEffectiveEquity();
+   double activeRiskPct  = GetActiveRiskPercent();
+   double riskBudgetCash = equity * (activeRiskPct / 100.0);
+ 
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0.0)
+  	tickSize = _Point;
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tickVal <= 0.0)
+  	tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickVal <= 0.0)
+  	tickVal = 1.0;
+ 
+   double techSlDist = (g_pineFirstBarSlDist > 0.0) ? g_pineFirstBarSlDist : (atrValue * g_customValueForFirstDay);
+   if(g_slMode == SL_MODE_ATR_LINE && g_pineTrailingStop > 0.0 && !g_pineStopPlotting)
+ 	{
+  	double refEntry = (openOrderCount > 0) ? openVwapEntry : (g_pinSizerEntry && g_sizerEntryPrice > 0.0 ? g_sizerEntryPrice : live);
+  	double distLine = MathAbs(refEntry - g_pineTrailingStop);
+  	if(distLine > 0.0)
+     	techSlDist = distLine;
+ 	}
+   else if(g_slMode == SL_MODE_POINTS)
+  	techSlDist = g_manualSlPts * _Point;
+   else if(g_slMode == SL_MODE_DRAG && g_sizerEntryPrice > 0.0 && g_sizerSlPrice > 0.0)
+  	techSlDist = MathAbs(g_sizerEntryPrice - g_sizerSlPrice);
+ 
+   if(techSlDist <= 0.0)
+  	techSlDist = atrValue * g_customValueForFirstDay;
+ 
+   if(openOrderCount > 0 && openTotalVol > 0.0)
+ 	{
+      g_sizerEntryPrice = NormalizeDouble(openVwapEntry, _Digits);
+      outDisplayVol 	= openTotalVol;
+ 
+  	string gvLock1R = "EAP82_LK1R_" + IntegerToString(anchorId);
+  	string gvLockSL = "EAP82_LKSL_" + IntegerToString(anchorId);
+  	string gvLockTP = "EAP82_LKTP_" + IntegerToString(anchorId);
+  	string gvLockVl = "EAP82_LKVL_" + IntegerToString(anchorId);
+ 
+  	double savedVol = GlobalVariableCheck(gvLockVl) ? GlobalVariableGet(gvLockVl) : 0.0;
+  	double locked1R = GlobalVariableCheck(gvLock1R) ? GlobalVariableGet(gvLock1R) : 0.0;
+  	double lockedSL = GlobalVariableCheck(gvLockSL) ? GlobalVariableGet(gvLockSL) : 0.0;
+  	double lockedTP = GlobalVariableCheck(gvLockTP) ? GlobalVariableGet(gvLockTP) : 0.0;
+ 
+  	bool slStillInRiskZone = (openActiveSL > 0.0) && ((isLong && openActiveSL < openVwapEntry - _Point) || (!isLong && openActiveSL > openVwapEntry + _Point));
+ 
+  	if(locked1R <= 0.0 || openTotalVol > savedVol + 1e-5 || (slStillInRiskZone && !g_isTrailingArmedNow))
+    	{
+         if(slStillInRiskZone)
+       	{
+        	locked1R = MathAbs(openVwapEntry - openActiveSL);
+       	}
+     	else if(g_volRule == RULE_SCALE_DIST_BY_VOL)
+       	{
+        	double allowedLossPerLot = (riskBudgetCash / openTotalVol) - g_commPerLot;
+        	double allowedTicks  	= (tickVal > 0.0) ? (allowedLossPerLot / tickVal) : 100.0;
+            locked1R             	= MathMax((allowedTicks * tickSize) - g_bufferPts * _Point, 20 * _Point);
+       	}
+     	else
+       	{
+        	locked1R = techSlDist;
+       	}
+     	lockedSL = (openActiveSL > 0.0) ? openActiveSL : NormalizeDouble(g_sizerEntryPrice - sign * locked1R, _Digits);
+     	lockedTP = (openActiveTP > 0.0) ? openActiveTP : NormalizeDouble(g_sizerEntryPrice + sign * locked1R * g_targetRR, _Digits);
+ 
+         GlobalVariableSet(gvLock1R, locked1R);
+         GlobalVariableSet(gvLockSL, lockedSL);
+         GlobalVariableSet(gvLockTP, lockedTP);
+         GlobalVariableSet(gvLockVl, openTotalVol);
+    	}
+ 
+  	outSlPriceDist = locked1R;
+  	g_sizerSlPrice = (openActiveSL > 0.0) ? NormalizeDouble(openActiveSL, _Digits) : NormalizeDouble(lockedSL, _Digits);
+  	g_sizerTpPrice = (openActiveTP > 0.0) ? NormalizeDouble(openActiveTP, _Digits) : NormalizeDouble(lockedTP, _Digits);
+ 
+  	double oneLotLoss = ((locked1R + g_bufferPts * _Point) / tickSize) * tickVal + g_commPerLot;
+      outRecommendedLot = (oneLotLoss > 0.0) ? FloorLotStep(riskBudgetCash / oneLotLoss) : 0.0;
+ 	}
+   else if(pendingCount > 0 && pendingEntry > 0.0)
+ 	{
+      g_sizerEntryPrice = NormalizeDouble(pendingEntry, _Digits);
+      outSlPriceDist	= (pendingSL > 0.0) ? MathAbs(pendingEntry - pendingSL) : techSlDist;
+      g_sizerSlPrice	= (pendingSL > 0.0) ? NormalizeDouble(pendingSL, _Digits) : NormalizeDouble(g_sizerEntryPrice - sign * outSlPriceDist, _Digits);
+      g_sizerTpPrice	= (pendingTP > 0.0) ? NormalizeDouble(pendingTP, _Digits) : NormalizeDouble(g_sizerEntryPrice + sign * outSlPriceDist * g_targetRR, _Digits);
+ 
+  	double oneLotLoss = ((outSlPriceDist + g_bufferPts * _Point) / tickSize) * tickVal + g_commPerLot;
+      outRecommendedLot = (oneLotLoss > 0.0) ? FloorLotStep(riskBudgetCash / oneLotLoss) : 0.0;
+      outDisplayVol 	= (pendingVol > 0.0) ? pendingVol : outRecommendedLot;
+ 	}
+   else
+ 	{
+  	double oneLotLoss = ((techSlDist + g_bufferPts * _Point) / tickSize) * tickVal + g_commPerLot;
+      outRecommendedLot = (oneLotLoss > 0.0) ? FloorLotStep(riskBudgetCash / oneLotLoss) : 0.0;
+      outDisplayVol 	= outRecommendedLot;
+ 
+  	if(g_slMode == SL_MODE_DRAG)
+    	{
+         if(g_sizerEntryPrice <= 0.0)
+            g_sizerEntryPrice = NormalizeDouble(live, _Digits);
+         if(g_sizerSlPrice <= 0.0)
+            g_sizerSlPrice = NormalizeDouble(g_sizerEntryPrice - sign * techSlDist, _Digits);
+ 
+         outSlPriceDist = MathAbs(g_sizerEntryPrice - g_sizerSlPrice);
+     	bool dragBuy   = (g_sizerEntryPrice >= g_sizerSlPrice);
+         g_tradeSide	= dragBuy ? SIDE_LONG : SIDE_SHORT;
+         g_sizerTpPrice = dragBuy ? NormalizeDouble(g_sizerEntryPrice + outSlPriceDist * g_targetRR, _Digits)
+                              	: NormalizeDouble(g_sizerEntryPrice - outSlPriceDist * g_targetRR, _Digits);
+    	}
+  	else if(g_pinSizerEntry && g_sizerEntryPrice > 0.0)
+    	{
+         outSlPriceDist = (g_pinnedSlDist > 0.0) ? g_pinnedSlDist : techSlDist;
+         g_sizerSlPrice = NormalizeDouble(g_sizerEntryPrice - sign * outSlPriceDist, _Digits);
+         g_sizerTpPrice = NormalizeDouble(g_sizerEntryPrice + sign * outSlPriceDist * g_targetRR, _Digits);
+    	}
+  	else
+    	{
+         g_sizerEntryPrice = NormalizeDouble(live, _Digits);
+         outSlPriceDist	= techSlDist;
+         g_pinnedSlDist	= techSlDist;
+         g_sizerSlPrice	= (g_slMode == SL_MODE_ATR_LINE && g_pineTrailingStop > 0.0 && !g_pineStopPlotting)
+                             ? NormalizeDouble(g_pineTrailingStop, _Digits)
+                             : NormalizeDouble(g_sizerEntryPrice - sign * outSlPriceDist, _Digits);
+         outSlPriceDist	= MathAbs(g_sizerEntryPrice - g_sizerSlPrice);
+         g_sizerTpPrice	= NormalizeDouble(g_sizerEntryPrice + sign * outSlPriceDist * g_targetRR, _Digits);
+    	}
+ 	}
+ 
+   double currentSlGap	= MathAbs(g_sizerEntryPrice - g_sizerSlPrice);
+   outSlPoints        	= (_Point > 0.0) ? (currentSlGap / _Point) : 0.0;
+   double tpDistancePrice = MathAbs(g_sizerTpPrice - g_sizerEntryPrice);
+   double actualRR    	= (outSlPriceDist > 0.0) ? (tpDistancePrice / outSlPriceDist) : g_targetRR;
+ 
+   double lossOneLotActual   = ((currentSlGap + g_bufferPts * _Point) / tickSize) * tickVal + g_commPerLot;
+   double rewardOneLotActual = MathMax(((tpDistancePrice - g_bufferPts * _Point) / tickSize) * tickVal - g_commPerLot, 0.0);
+ 
+   outDisplayRiskCash   = outDisplayVol * lossOneLotActual;
+   outDisplayRiskPct	= (equity > 0.0) ? (outDisplayRiskCash / equity * 100.0) : 0.0;
+   outDisplayRewardCash = outDisplayVol * rewardOneLotActual;
+ 
+   double minL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(outDisplayVol > 0.0 && g_enPartial)
+ 	{
+  	double pLot = FloorLotStep(outDisplayVol * (g_partialPct / 100.0));
+  	if(pLot >= minL && (outDisplayVol - pLot) >= minL - 1e-6)
+    	{
+     	outPartialLot = pLot;
+         outRemainLot  = NormalizeDouble(outDisplayVol - pLot, GetStepDigits(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP)));
+    	}
+  	else
+    	{
+     	outPartialLot = 0.0;
+         outRemainLot  = outDisplayVol;
+    	}
+ 	}
+   else
+ 	{
+  	outPartialLot = 0.0;
+      outRemainLot  = outDisplayVol;
+ 	}
+ 
+   // =========================================================================
+   // XÁC ĐỊNH VỊ TRÍ HỘP SL/TP BÁM ĐÚNG CÂY NẾN VÀO LỆNH THỰC TẾ -> NẾN BAR 0
+   // =========================================================================
+   datetime bar0   = iTime(_Symbol, PERIOD_CURRENT, 0);
+   int  	sec    = PeriodSeconds(PERIOD_CURRENT);
+   datetime tRight = bar0;
+   datetime tLeft  = bar0 - sec * 18;
+ 
+   if(openOrderCount > 0 && earliestOpenTime > 0)
+ 	{
+  	int openShift = iBarShift(_Symbol, PERIOD_CURRENT, earliestOpenTime, false);
+  	datetime exactOpenBar = (openShift >= 0) ? iTime(_Symbol, PERIOD_CURRENT, openShift) : earliestOpenTime;
+  	// Hộp SL/TP bắt đầu từ đúng cây nến mở lệnh thực tế (nếu mới mở < 6 nến thì mở rộng nhẹ về bên trái để nhìn rõ màu hộp, còn tâm ngắm ⦿ luôn ghim đúng nến mở!)
+  	tLeft = MathMin(exactOpenBar, bar0 - sec * 6);
+ 	}
+   else if(pendingCount > 0 && pendingTime > 0)
+ 	{
+  	int pendShift = iBarShift(_Symbol, PERIOD_CURRENT, pendingTime, false);
+  	datetime exactPendBar = (pendShift >= 0) ? iTime(_Symbol, PERIOD_CURRENT, pendShift) : pendingTime;
+  	tLeft = MathMin(exactPendBar, bar0 - sec * 8);
+ 	}
+ 
+   DrawSizerHLine("ENTRY", g_sizerEntryPrice, clrDodgerBlue, 2, STYLE_SOLID, g_showSizer);
+   DrawSizerHLine("SL",    g_sizerSlPrice,	clrRed,    	2, STYLE_SOLID, g_showSizer);
+   DrawSizerHLine("TP",    g_sizerTpPrice,    clrLimeGreen,  2, STYLE_DASH,  g_showSizer);
+ 
+   DrawSizerZone("Z_RISK",   tLeft, tRight, g_sizerEntryPrice, g_sizerSlPrice, clrRed,   	g_showSizer);
+   DrawSizerZone("Z_REWARD", tLeft, tRight, g_sizerEntryPrice, g_sizerTpPrice, clrLimeGreen, g_showSizer);
+ 
+   string tfLockStr   = GetTfShortName(g_resolvedAtrTf);
+   string openTimeStr = (openOrderCount > 0 && earliestOpenTime > 0) ? TimeToString(earliestOpenTime, TIME_MINUTES) : "";
+ 
+   string entryTagTxt = (openOrderCount > 0)
+                        ? StringFormat("📌 ENTRY (%d lệnh | Lúc %s | %s): %s | %.2f LOT  ",
+                                       openOrderCount, openTimeStr, tfLockStr, DoubleToString(g_sizerEntryPrice, _Digits), outDisplayVol)
+                        : StringFormat("ENTRY %s (Khung %s) | GỢI Ý: %.2f LOT (Risk %.2f%%)  ",
+                                       DoubleToString(g_sizerEntryPrice, _Digits), tfLockStr, outRecommendedLot, activeRiskPct);
+ 
+   string slTagTxt	= StringFormat("STOP LOSS %s (%.0f pts) | Risk (%.2f Lot): -$%.2f (%.2f%%)  ",
+                                     DoubleToString(g_sizerSlPrice, _Digits), outSlPoints, outDisplayVol, outDisplayRiskCash, outDisplayRiskPct);
+ 
+   string tpTagTxt	= StringFormat("TAKE PROFIT %s (1:%.1fR) | Kỳ vọng (%.2f Lot): +$%.2f  ",
+                                     DoubleToString(g_sizerTpPrice, _Digits), actualRR, outDisplayVol, outDisplayRewardCash);
+ 
+   // Neo nhãn ENTRY / SL / TP kết thúc tại bar0 (ANCHOR_RIGHT_LOWER) để nằm trọn bên trong hộp từ Nến Mở Lệnh -> bar0
+   // và không bao giờ tràn sang vùng Tầng 1-2-3 ở bên phải bar0!
+   DrawSizerTag("T_ENTRY", tRight, g_sizerEntryPrice, entryTagTxt, clrDodgerBlue, ANCHOR_RIGHT_LOWER, g_showSizer);
+   DrawSizerTag("T_SL",    tRight, g_sizerSlPrice,    slTagTxt,	clrTomato, 	ANCHOR_RIGHT_LOWER, g_showSizer);
+   DrawSizerTag("T_TP",    tRight, g_sizerTpPrice,    tpTagTxt,	clrLime,   	ANCHOR_RIGHT_LOWER, g_showSizer);
+  }
+ 
+void CloseAllTradesAndOrders(string reason)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+ 	{
+  	ulong ticket = PositionGetTicket(i);
+  	if(ticket > 0)
+         trade.PositionClose(ticket);
+ 	}
+   for(int j = OrdersTotal() - 1; j >= 0; j--)
+ 	{
+  	ulong ordTicket = OrderGetTicket(j);
+  	if(ordTicket > 0)
+         trade.OrderDelete(ordTicket);
+ 	}
+   Print("EA PRO v8.2 [ĐÓNG TOÀN BỘ]: ", reason);
+  }
+ 
+//+------------------------------------------------------------------+
+//| XỬ LÝ LÕI: TỰ CẬP NHẬT NGÀY MỚI, KHÓA KHUNG & VẼ NHẬT KÝ LỆNH   |
+//+------------------------------------------------------------------+
+void ProcessCoreLogic()
+  {
+   double dayPnl, dayPct, weekPnl, weekPct, monthPnl, monthPct;
+   CalculateDayWeekMonthPnl(dayPnl, dayPct, weekPnl, weekPct, monthPnl, monthPct);
+ 
+   if((g_riskBreached || g_manualForceLock) && (PositionsTotal() > 0 || OrdersTotal() > 0))
+ 	{
+  	string msg = g_manualForceLock ? "Đang bật Khóa Ngay thủ công" : g_breachReason;
+      CloseAllTradesAndOrders(msg);
+  	Alert("EA RISK GUARD: Đã tự động đóng toàn bộ lệnh! Lý do: ", msg);
+ 	}
+ 
+   if(g_inRecoveryMode && g_enHalfRiskRec && PositionsTotal() > g_maxRecOrders)
+ 	{
+  	ulong newestTicket = 0;
+  	datetime newestTime = 0;
+  	for(int k = PositionsTotal() - 1; k >= 0; k--)
+    	{
+     	ulong tk = PositionGetTicket(k);
+     	if(tk > 0)
+       	{
+        	datetime tOpen = (datetime)PositionGetInteger(POSITION_TIME);
+        	if(tOpen >= newestTime)
+          	{ newestTime = tOpen; newestTicket = tk; }
+       	}
+    	}
+  	if(newestTicket > 0)
+    	{
+         trade.PositionClose(newestTicket);
+         Alert("CHẾ ĐỘ PHỤC HỒI: Chỉ cho phép mở tối đa ", g_maxRecOrders, " lệnh! Đã đóng lệnh nhồi thêm #", newestTicket);
+    	}
+ 	}
+ 
+   datetime newsWinStart = 0, newsWinEnd = 0;
+   g_newsLockedState = CheckNewsScheduleAndLock(newsWinStart, newsWinEnd);
+   if(g_enNewsFilter && g_newsLockedState)
+ 	{
+  	for(int j = OrdersTotal() - 1; j >= 0; j--)
+    	{
+     	ulong ord = OrderGetTicket(j);
+     	if(ord > 0)
+            trade.OrderDelete(ord);
+    	}
+  	for(int i = PositionsTotal() - 1; i >= 0; i--)
+    	{
+     	ulong t = PositionGetTicket(i);
+     	if(t > 0)
+       	{
+        	datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
+            if(newsWinStart > 0 && posOpenTime >= newsWinStart && posOpenTime <= newsWinEnd)
+          	{
+               trade.PositionClose(t);
+               Alert("CẤM TRADE TRONG GIỜ TIN! Đã đóng lệnh mở trong khung cấm tin #", t);
+          	}
+       	}
+    	}
+ 	}
+ 
+   double   bid          	= SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double   ask          	= SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   int  	buyCount     	= 0, sellCount = 0;
+   double   buyVolSum    	= 0.0, sellVolSum = 0.0;
+   double   buyPriceVolSum   = 0.0, sellPriceVolSum = 0.0;
+   datetime earliestOpenTime = 0;
+   long 	anchorPosId  	= 0;
+   double   repSL        	= 0.0, repTP = 0.0, netFloatingPnl = 0.0;
+ 
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+ 	{
+  	ulong ticket = PositionGetTicket(i);
+  	if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+     	continue;
+ 
+  	double   entry    = PositionGetDouble(POSITION_PRICE_OPEN);
+  	double   vol      = PositionGetDouble(POSITION_VOLUME);
+  	double   sl       = PositionGetDouble(POSITION_SL);
+  	double   tp       = PositionGetDouble(POSITION_TP);
+  	datetime oTime	= (datetime)PositionGetInteger(POSITION_TIME);
+  	long 	pId      = PositionGetInteger(POSITION_IDENTIFIER);
+  	bool 	isBuyPos = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+ 
+  	netFloatingPnl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      if(earliestOpenTime == 0 || oTime < earliestOpenTime)
+    	{
+         earliestOpenTime = oTime;
+         anchorPosId  	= pId;
+    	}
+  	if(sl > 0.0) repSL = sl;
+  	if(tp > 0.0) repTP = tp;
+ 
+  	if(isBuyPos)
+    	{ buyCount++;  buyVolSum  += vol; buyPriceVolSum  += entry * vol; }
+  	else
+    	{ sellCount++; sellVolSum += vol; sellPriceVolSum += entry * vol; }
+ 	}
+ 
+   int	openCount    = buyCount + sellCount;
+   bool   basketIsLong = (buyVolSum >= sellVolSum);
+   double totalOpenVol = basketIsLong ? buyVolSum : sellVolSum;
+   double vwapEntry	= (totalOpenVol > 0.0) ? ((basketIsLong ? buyPriceVolSum : sellPriceVolSum) / totalOpenVol) : 0.0;
+   double currentR 	= 0.0;
+ 
+   // Vẽ ghim tâm ngắm (⦿) từng lệnh đang mở tại đúng cây nến vào lệnh & Vẽ lịch sử Nhật ký giao dịch
+   DrawOrderPinsAndTradingJournal(openCount, vwapEntry, basketIsLong);
+ 
+   if(openCount > 0 && totalOpenVol > 0.0)
+ 	{
+  	ENUM_TRADE_SIDE activeSide = basketIsLong ? SIDE_LONG : SIDE_SHORT;
+  	double curActualSlDist 	= (repSL > 0.0) ? MathAbs(vwapEntry - repSL) : 0.0;
+ 
+  	g_resolvedAtrTf = ResolveActiveAtrTimeframe(openCount, anchorPosId, earliestOpenTime, curActualSlDist);
+      SyncAnchorDateFields(g_resolvedAtrTf, earliestOpenTime);
+ 
+  	double rawTrail = ExecuteExactPineScriptFormula(g_resolvedAtrTf, earliestOpenTime, vwapEntry, activeSide, g_showAtrPlot, false,
+                                                      g_pineEntryLevel, g_pineFirstBarSlDist, g_pineStopPlotting, g_pineStartCalc);
+ 
+  	string gvBestTrail = "EAP82_BSK_BESTTRAIL_" + IntegerToString(anchorPosId);
+  	if(rawTrail > 0.0 && !g_pineStopPlotting)
+    	{
+         if(GlobalVariableCheck(gvBestTrail))
+       	{
+        	double prevBest = GlobalVariableGet(gvBestTrail);
+            if(prevBest > 0.0)
+               rawTrail = basketIsLong ? MathMax(rawTrail, prevBest) : MathMin(rawTrail, prevBest);
+       	}
+         GlobalVariableSet(gvBestTrail, rawTrail);
+    	}
+      g_pineTrailingStop = rawTrail;
+ 
+      if(!g_showAtrPlot)
+         ObjectsDeleteAll(0, VIS_PREFIX + "ATRLINE_");
+ 
+  	double slDistCalc, slPtsCalc, recLot, dispVol, dispRiskCash, dispRiskPct, dispRewardCash, partLot, remLot;
+      CalculateSizingAndActiveRules(openCount, totalOpenVol, vwapEntry, repSL, repTP, basketIsLong, anchorPosId, earliestOpenTime,
+                                	slDistCalc, slPtsCalc, recLot, dispVol, dispRiskCash, dispRiskPct, dispRewardCash, partLot, remLot);
+ 
+  	double   prevBarClose = iClose(_Symbol, g_resolvedAtrTf, 1);
+  	datetime prevBarTime  = iTime(_Symbol, g_resolvedAtrTf, 1);
+ 
+  	if(g_multiMode == MULTI_BASKET_VWAP)
+    	{
+     	string gvBasket1R 	= "EAP82_BSK_1R_" 	+ IntegerToString(anchorPosId);
+     	string gvBasketArmed  = "EAP82_BSK_ARMED_"  + IntegerToString(anchorPosId);
+     	string gvBasketCnt	= "EAP82_BSK_CNT_"	+ IntegerToString(anchorPosId);
+     	string gvBasketTier2  = "EAP82_BSK_TIER2_"  + IntegerToString(anchorPosId);
+     	string gvBasketT2Time = "EAP82_BSK_T2TIME_" + IntegerToString(anchorPosId);
+     	string gvLockedInitSL = "EAP82_BSK_INITSL_" + IntegerToString(anchorPosId);
+     	string gvLockedInitTP = "EAP82_BSK_INITTP_" + IntegerToString(anchorPosId);
+ 
+     	int	savedCnt = GlobalVariableCheck(gvBasketCnt) ? (int)GlobalVariableGet(gvBasketCnt) : 0;
+     	double basket1R = GlobalVariableCheck(gvBasket1R)  ? GlobalVariableGet(gvBasket1R)  : 0.0;
+ 
+     	bool isNewOrderAdded   = (openCount > savedCnt);
+     	bool slStillInRiskZone = (repSL > 0.0) && ((basketIsLong && repSL < vwapEntry - _Point) || (!basketIsLong && repSL > vwapEntry + _Point));
+ 
+     	if(basket1R <= 0.0 || isNewOrderAdded || (slStillInRiskZone && !g_isTrailingArmedNow))
+       	{
+        	basket1R = slStillInRiskZone ? MathAbs(vwapEntry - repSL)
+                                     	: ((slDistCalc > 0.0) ? slDistCalc : ((g_pineFirstBarSlDist > 0.0) ? g_pineFirstBarSlDist : (g_pineLatestAtr * g_customValueForFirstDay)));
+        	double lockSL = (repSL > 0.0) ? repSL : (basketIsLong ? NormalizeDouble(vwapEntry - basket1R, _Digits) : NormalizeDouble(vwapEntry + basket1R, _Digits));
+        	double lockTP = (repTP > 0.0) ? repTP : (basketIsLong ? NormalizeDouble(vwapEntry + basket1R * g_targetRR, _Digits) : NormalizeDouble(vwapEntry - basket1R * g_targetRR, _Digits));
+ 
+            GlobalVariableSet(gvBasket1R,     basket1R);
+            GlobalVariableSet(gvLockedInitSL, lockSL);
+            GlobalVariableSet(gvLockedInitTP, lockTP);
+            GlobalVariableSet(gvBasketCnt,    (double)openCount);
+       	}
+     	else if(openCount < savedCnt)
+       	{
+            GlobalVariableSet(gvBasketCnt, (double)openCount);
+       	}
+ 
+     	double unifiedInitSL = GlobalVariableCheck(gvLockedInitSL) ? GlobalVariableGet(gvLockedInitSL)
+                                                                    : (basketIsLong ? NormalizeDouble(vwapEntry - basket1R, _Digits) : NormalizeDouble(vwapEntry + basket1R, _Digits));
+     	double unifiedInitTP = GlobalVariableCheck(gvLockedInitTP) ? GlobalVariableGet(gvLockedInitTP)
+                                                                    : (basketIsLong ? NormalizeDouble(vwapEntry + basket1R * g_targetRR, _Digits) : NormalizeDouble(vwapEntry - basket1R * g_targetRR, _Digits));
+ 
+     	double buffer20Pct1R	= basket1R * (g_tierPctOf1R / 100.0);
+     	double activeWickBuffer = (g_sweepMode == SWEEP_HARD_SL_ON_LINE) ? 0.0 : buffer20Pct1R;
+ 
+     	double livePrice  = basketIsLong ? bid : ask;
+     	double profitDist = basketIsLong ? (livePrice - vwapEntry) : (vwapEntry - livePrice);
+     	currentR      	= (basket1R > 0.0) ? (profitDist / basket1R) : 0.0;
+ 
+     	bool wasArmed = GlobalVariableCheck(gvBasketArmed) ? (GlobalVariableGet(gvBasketArmed) > 0.5) : false;
+     	if(currentR >= g_trailStartRR)
+       	{
+            if(!wasArmed)
+          	{
+               wasArmed = true;
+               GlobalVariableSet(gvBasketArmed, 1.0);
+          	}
+       	}
+         g_isTrailingArmedNow = wasArmed;
+ 
+     	if(g_enTrail && g_trailStyle == TRAIL_STYLE_AUTO_ATR && g_isTrailingArmedNow && g_pineTrailingStop > 0.0)
+       	{
+        	double minLock20PctPrice = basketIsLong ? (vwapEntry + buffer20Pct1R) : (vwapEntry - buffer20Pct1R);
+        	double tier3HardPrice	= basketIsLong ? MathMax(minLock20PctPrice, g_pineTrailingStop - activeWickBuffer)
+                                                    : MathMin(minLock20PctPrice, g_pineTrailingStop + activeWickBuffer);
+ 
+        	bool piercedTier3Realtime = (basketIsLong  && livePrice <= tier3HardPrice) ||
+                                        (!basketIsLong && livePrice >= tier3HardPrice);
+ 
+            if(piercedTier3Realtime)
+          	{
+           	for(int c = PositionsTotal() - 1; c >= 0; c--)
+             	{
+                  ulong tk = PositionGetTicket(c);
+                  if(tk > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+                     trade.PositionClose(tk);
+             	}
+               Alert(StringFormat("🛡 TẦNG 3 (SL LUÔN): Giá đâm mạnh xuyên thủng 3 tầng vi phạm %.0f%% của 1R -> Đã đóng 100%% vị thế!", g_tierPctOf1R));
+           	return;
+          	}
+ 
+            if(prevBarTime > earliestOpenTime)
+          	{
+           	bool closedBeyondTier1 = (basketIsLong  && prevBarClose < g_pineTrailingStop) ||
+                                        (!basketIsLong && prevBarClose > g_pineTrailingStop);
+           	bool closedBeyondTier3 = (basketIsLong  && prevBarClose <= tier3HardPrice) ||
+                                        (!basketIsLong && prevBarClose >= tier3HardPrice);
+ 
+               if(g_sweepMode == SWEEP_3LAYER_20PCT_1R)
+             	{
+              	bool alreadyCutTier2 = GlobalVariableCheck(gvBasketTier2);
+                  datetime lastT2Bar   = GlobalVariableCheck(gvBasketT2Time) ? (datetime)GlobalVariableGet(gvBasketT2Time) : 0;
+ 
+                  if(closedBeyondTier3)
+                	{
+                     for(int c = PositionsTotal() - 1; c >= 0; c--)
+                       {
+                        ulong tk = PositionGetTicket(c);
+                        if(tk > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+                           trade.PositionClose(tk);
+                       }
+                     Alert("🛡 TẦNG 3: Nến đóng cửa xuyên thủng biên 20% của 1R -> Đã cắt toàn bộ 100% vị thế!");
+                     return;
+                	}
+              	else if(closedBeyondTier1)
+                	{
+                     if(!alreadyCutTier2)
+                       {
+                        for(int c = PositionsTotal() - 1; c >= 0; c--)
+                          {
+                           ulong tk = PositionGetTicket(c);
+                           if(tk > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+                             {
+                              double vol  = PositionGetDouble(POSITION_VOLUME);
+                              double half = FloorLotStep(vol * 0.5);
+                              if(half >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) && (vol - half) >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) - 1e-6)
+                                 trade.PositionClosePartial(tk, half);
+                             }
+                          }
+                        GlobalVariableSet(gvBasketTier2,  prevBarClose);
+                        GlobalVariableSet(gvBasketT2Time, (double)prevBarTime);
+                        Alert(StringFormat("◐ TẦNG 2: Nến %s đóng cửa không rút râu nhưng chưa vi phạm %.0f%% 1R -> Đã cắt 50%% vị thế!", GetTfShortName(g_resolvedAtrTf), g_tierPctOf1R));
+                       }
+                     else if(prevBarTime > lastT2Bar)
+                       {
+                        double t2RefClose = GlobalVariableGet(gvBasketTier2);
+                        bool   droppedFurther = (basketIsLong && prevBarClose < t2RefClose) || (!basketIsLong && prevBarClose > t2RefClose);
+                        if(droppedFurther)
+                          {
+                           for(int c = PositionsTotal() - 1; c >= 0; c--)
+                             {
+                              ulong tk = PositionGetTicket(c);
+                              if(tk > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+                                 trade.PositionClose(tk);
+                             }
+                           Alert("🛡 TẦNG 3: Giá tiếp tục giảm xuyên qua sau Tầng 2 -> Đã cắt toàn bộ vị thế còn lại!");
+                           return;
+                          }
+                       }
+                	}
+             	}
+           	else if(g_sweepMode == SWEEP_WAIT_CANDLE_CLOSE && closedBeyondTier1)
+             	{
+                  for(int c = PositionsTotal() - 1; c >= 0; c--)
+                	{
+                     ulong tk = PositionGetTicket(c);
+                     if(tk > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+                        trade.PositionClose(tk);
+                	}
+                  Alert("ATR WICK-PROOF: Nến đóng cửa vượt đường ATR -> Đã chốt toàn bộ rổ lệnh!");
+                  return;
+             	}
+          	}
+       	}
+ 
+     	for(int i = PositionsTotal() - 1; i >= 0; i--)
+       	{
+        	ulong ticket = PositionGetTicket(i);
+        	if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+               continue;
+        	bool isLong = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+        	if(isLong != basketIsLong)
+               continue;
+ 
+        	long   posId      = PositionGetInteger(POSITION_IDENTIFIER);
+        	double curSL  	= PositionGetDouble(POSITION_SL);
+        	double curTP  	= PositionGetDouble(POSITION_TP);
+        	double curVol 	= PositionGetDouble(POSITION_VOLUME);
+        	string gvPart 	= "EAP82_PART_" 	+ IntegerToString(posId);
+        	string gvInitDone = "EAP82_INITDONE_" + IntegerToString(posId);
+ 
+            if(g_autoSlTp && (!GlobalVariableCheck(gvInitDone) || isNewOrderAdded))
+          	{
+           	double targetInitSL = (curSL <= 0.0 || isNewOrderAdded) ? unifiedInitSL : curSL;
+           	double targetInitTP = (curTP <= 0.0 || isNewOrderAdded) ? unifiedInitTP : curTP;
+ 
+               if(MathAbs(curSL - targetInitSL) >= _Point || MathAbs(curTP - targetInitTP) >= _Point)
+             	{
+                  if(trade.PositionModify(ticket, targetInitSL, targetInitTP))
+                	{ curSL = targetInitSL; curTP = targetInitTP; repSL = curSL; repTP = curTP; }
+             	}
+               GlobalVariableSet(gvInitDone, 1.0);
+          	}
+ 
+            if(g_enPartial && !GlobalVariableCheck(gvPart) && currentR >= g_partialRR)
+          	{
+           	double closeVol = FloorLotStep(curVol * (g_partialPct / 100.0));
+           	double minLot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+               if(closeVol >= minLot && (curVol - closeVol) >= minLot - 1e-6)
+             	{
+                  if(trade.PositionClosePartial(ticket, closeVol))
+                     GlobalVariableSet(gvPart, 1.0);
+             	}
+           	else
+                  GlobalVariableSet(gvPart, 1.0);
+          	}
+ 
+            if(g_trailStyle == TRAIL_STYLE_MANUAL_SL)
+               continue;
+ 
+        	double targetSL = curSL;
+        	if(isLong)
+          	{
+               if(g_enBe && currentR >= g_beRR)
+             	{
+                  double bePrice = NormalizeDouble(vwapEntry + g_bePoints * _Point, _Digits);
+                  if(bePrice > targetSL) targetSL = bePrice;
+             	}
+               if(g_trailStyle == TRAIL_STYLE_AUTO_ATR && g_isTrailingArmedNow)
+             	{
+                  double floor20Pct1R = NormalizeDouble(vwapEntry + buffer20Pct1R, _Digits);
+                  if(floor20Pct1R > targetSL) targetSL = floor20Pct1R;
+             	}
+               if(g_enTrail && g_trailStyle == TRAIL_STYLE_AUTO_ATR && g_isTrailingArmedNow && g_pineTrailingStop > 0.0)
+             	{
+                  double brokerTier3SL = NormalizeDouble(g_pineTrailingStop - activeWickBuffer, _Digits);
+                  if(brokerTier3SL > vwapEntry && brokerTier3SL > targetSL)
+                     targetSL = brokerTier3SL;
+             	}
+               if(targetSL > curSL + _Point * 0.5 && targetSL < bid)
+             	{
+                  if(trade.PositionModify(ticket, targetSL, curTP))
+                     repSL = targetSL;
+             	}
+          	}
+        	else
+          	{
+               if(g_enBe && currentR >= g_beRR)
+             	{
+                  double bePrice = NormalizeDouble(vwapEntry - g_bePoints * _Point, _Digits);
+                  if(targetSL <= 0.0 || bePrice < targetSL) targetSL = bePrice;
+             	}
+               if(g_trailStyle == TRAIL_STYLE_AUTO_ATR && g_isTrailingArmedNow)
+             	{
+                  double floor20Pct1R = NormalizeDouble(vwapEntry - buffer20Pct1R, _Digits);
+                  if(targetSL <= 0.0 || floor20Pct1R < targetSL) targetSL = floor20Pct1R;
+             	}
+               if(g_enTrail && g_trailStyle == TRAIL_STYLE_AUTO_ATR && g_isTrailingArmedNow && g_pineTrailingStop > 0.0)
+             	{
+                  double brokerTier3SL = NormalizeDouble(g_pineTrailingStop + activeWickBuffer, _Digits);
+                  if(brokerTier3SL < vwapEntry && (targetSL <= 0.0 || brokerTier3SL < targetSL))
+                     targetSL = brokerTier3SL;
+             	}
+               if(targetSL > 0.0 && (curSL <= 0.0 || targetSL < curSL - _Point * 0.5) && targetSL > ask)
+             	{
+                  if(trade.PositionModify(ticket, targetSL, curTP))
+                     repSL = targetSL;
+             	}
+          	}
+       	}
+ 
+         DrawCurrentAtrSpotlight(g_pineTrailingStop, basket1R, activeSide, openCount, repSL, g_pineStopPlotting, currentR, g_isTrailingArmedNow);
+    	}
+  	else // MULTI_INDIVIDUAL
+    	{
+         g_isTrailingArmedNow = false;
+     	for(int i = PositionsTotal() - 1; i >= 0; i--)
+       	{
+        	ulong ticket = PositionGetTicket(i);
+        	if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+               continue;
+ 
+        	long 	posId     = PositionGetInteger(POSITION_IDENTIFIER);
+        	datetime openTime  = (datetime)PositionGetInteger(POSITION_TIME);
+            double   entry 	= PositionGetDouble(POSITION_PRICE_OPEN);
+            double   curSL 	= PositionGetDouble(POSITION_SL);
+            double   curTP 	= PositionGetDouble(POSITION_TP);
+            double   curVol	= PositionGetDouble(POSITION_VOLUME);
+        	bool 	isLong    = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+            double   livePrice = isLong ? bid : ask;
+ 
+            ENUM_TIMEFRAMES indTf = ResolveActiveAtrTimeframe(1, posId, openTime, (curSL > 0.0 ? MathAbs(entry - curSL) : 0.0));
+        	double indEntry = 0.0, indFirstDist = 0.0;
+        	bool   indStopPlot = false, indStart = false;
+        	double indTrail = ExecuteExactPineScriptFormula(indTf, openTime, entry, isLong ? SIDE_LONG : SIDE_SHORT, false, false,
+                                                            indEntry, indFirstDist, indStopPlot, indStart);
+ 
+        	string gvBestInd = "EAP82_IND_BEST_" + IntegerToString(posId);
+            if(indTrail > 0.0 && !indStopPlot)
+          	{
+               if(GlobalVariableCheck(gvBestInd))
+             	{
+                  double prevB = GlobalVariableGet(gvBestInd);
+                  if(prevB > 0.0)
+                     indTrail = isLong ? MathMax(indTrail, prevB) : MathMin(indTrail, prevB);
+             	}
+               GlobalVariableSet(gvBestInd, indTrail);
+          	}
+ 
+        	string gv1R   	= "EAP82_1R_"   	+ IntegerToString(posId);
+        	string gvPart 	= "EAP82_PART_" 	+ IntegerToString(posId);
+        	string gvArmed	= "EAP82_ARMED_"	+ IntegerToString(posId);
+        	string gvInitDone = "EAP82_INITDONE_" + IntegerToString(posId);
+        	string gvTier2	= "EAP82_TIER2_"	+ IntegerToString(posId);
+        	string gvT2Time   = "EAP82_T2TIME_"   + IntegerToString(posId);
+        	double slDist 	= GlobalVariableCheck(gv1R) ? GlobalVariableGet(gv1R) : 0.0;
+ 
+        	bool indSlInRisk = (curSL > 0.0) && ((isLong && curSL < entry - _Point) || (!isLong && curSL > entry + _Point));
+        	if(slDist <= 0.0 || indSlInRisk)
+          	{
+           	slDist = indSlInRisk ? MathAbs(entry - curSL) : ((indFirstDist > 0.0) ? indFirstDist : slDistCalc);
+               GlobalVariableSet(gv1R, slDist);
+          	}
+ 
+            if(g_autoSlTp && !GlobalVariableCheck(gvInitDone))
+          	{
+           	double initSL = (curSL > 0.0) ? curSL : (isLong ? NormalizeDouble(entry - slDist, _Digits) : NormalizeDouble(entry + slDist, _Digits));
+           	double initTP = (curTP > 0.0) ? curTP : (isLong ? NormalizeDouble(entry + slDist * g_targetRR, _Digits) : NormalizeDouble(entry - slDist * g_targetRR, _Digits));
+               if(MathAbs(curSL - initSL) >= _Point || MathAbs(curTP - initTP) >= _Point)
+             	{
+                  if(trade.PositionModify(ticket, initSL, initTP))
+                	{ curSL = initSL; curTP = initTP; }
+             	}
+               GlobalVariableSet(gvInitDone, 1.0);
+          	}
+ 
+        	double indBuf20Pct1R = slDist * (g_tierPctOf1R / 100.0);
+        	double indWickBuffer = (g_sweepMode == SWEEP_HARD_SL_ON_LINE) ? 0.0 : indBuf20Pct1R;
+ 
+        	double profDist = isLong ? (livePrice - entry) : (entry - livePrice);
+        	double ticketR  = (slDist > 0.0) ? (profDist / slDist) : 0.0;
+            currentR    	= ticketR;
+ 
+        	bool ticketArmed = GlobalVariableCheck(gvArmed) ? (GlobalVariableGet(gvArmed) > 0.5) : false;
+        	if(ticketR >= g_trailStartRR && !ticketArmed)
+          	{
+               ticketArmed = true;
+               GlobalVariableSet(gvArmed, 1.0);
+          	}
+            if(ticketArmed)
+               g_isTrailingArmedNow = true;
+ 
+            if(g_enPartial && !GlobalVariableCheck(gvPart) && ticketR >= g_partialRR)
+          	{
+           	double closeVol = FloorLotStep(curVol * (g_partialPct / 100.0));
+           	double minLot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+               if(closeVol >= minLot && (curVol - closeVol) >= minLot - 1e-6)
+             	{
+                  if(trade.PositionClosePartial(ticket, closeVol))
+                     GlobalVariableSet(gvPart, 1.0);
+             	}
+           	else
+                  GlobalVariableSet(gvPart, 1.0);
+          	}
+ 
+            if(g_trailStyle == TRAIL_STYLE_MANUAL_SL)
+               continue;
+ 
+            double   indPrevClose = iClose(_Symbol, indTf, 1);
+        	datetime indPrevTime  = iTime(_Symbol, indTf, 1);
+ 
+            if(g_enTrail && g_trailStyle == TRAIL_STYLE_AUTO_ATR && ticketArmed && indTrail > 0.0)
+          	{
+           	double minFloor20 = isLong ? (entry + indBuf20Pct1R) : (entry - indBuf20Pct1R);
+           	double t3HardP	= isLong ? MathMax(minFloor20, indTrail - indWickBuffer)
+                                      	: MathMin(minFloor20, indTrail + indWickBuffer);
+ 
+               if((isLong && livePrice <= t3HardP) || (!isLong && livePrice >= t3HardP))
+             	{
+                  trade.PositionClose(ticket);
+                  continue;
+             	}
+ 
+               if(indPrevTime > openTime)
+             	{
+              	bool cBeyondT1 = (isLong && indPrevClose < indTrail) || (!isLong && indPrevClose > indTrail);
+              	bool cBeyondT3 = (isLong && indPrevClose <= t3HardP) || (!isLong && indPrevClose >= t3HardP);
+ 
+                  if(g_sweepMode == SWEEP_3LAYER_20PCT_1R)
+                	{
+                     bool hasT2   = GlobalVariableCheck(gvTier2);
+                     datetime t2T = GlobalVariableCheck(gvT2Time) ? (datetime)GlobalVariableGet(gvT2Time) : 0;
+ 
+                     if(cBeyondT3)
+                       {
+                        trade.PositionClose(ticket);
+                        continue;
+                       }
+                     else if(cBeyondT1)
+                       {
+                        if(!hasT2)
+                          {
+                           double halfV = FloorLotStep(curVol * 0.5);
+                           if(halfV >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) && (curVol - halfV) >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) - 1e-6)
+                              trade.PositionClosePartial(ticket, halfV);
+                           GlobalVariableSet(gvTier2,  indPrevClose);
+                           GlobalVariableSet(gvT2Time, (double)indPrevTime);
+                          }
+                        else if(indPrevTime > t2T)
+                          {
+                           double prevT2Close = GlobalVariableGet(gvTier2);
+                           if((isLong && indPrevClose < prevT2Close) || (!isLong && indPrevClose > prevT2Close))
+                             {
+                              trade.PositionClose(ticket);
+                              continue;
+                             }
+                          }
+                       }
+                	}
+              	else if(g_sweepMode == SWEEP_WAIT_CANDLE_CLOSE && cBeyondT1)
+                	{
+                     trade.PositionClose(ticket);
+                     continue;
+                	}
+             	}
+          	}
+ 
+        	double targetSL = curSL;
+        	if(isLong)
+          	{
+               if(g_enBe && ticketR >= g_beRR)
+             	{ double beP = NormalizeDouble(entry + g_bePoints * _Point, _Digits); if(beP > targetSL) targetSL = beP; }
+               if(g_trailStyle == TRAIL_STYLE_AUTO_ATR && ticketArmed)
+             	{ double flP = NormalizeDouble(entry + indBuf20Pct1R, _Digits); if(flP > targetSL) targetSL = flP; }
+               if(g_enTrail && g_trailStyle == TRAIL_STYLE_AUTO_ATR && ticketArmed && indTrail > 0.0)
+             	{
+                  double trP = NormalizeDouble(indTrail - indWickBuffer, _Digits);
+                  if(trP > entry && trP > targetSL) targetSL = trP;
+             	}
+               if(targetSL > curSL + _Point * 0.5 && targetSL < bid)
+                  trade.PositionModify(ticket, targetSL, curTP);
+          	}
+        	else
+          	{
+               if(g_enBe && ticketR >= g_beRR)
+             	{ double beP = NormalizeDouble(entry - g_bePoints * _Point, _Digits); if(targetSL <= 0.0 || beP < targetSL) targetSL = beP; }
+               if(g_trailStyle == TRAIL_STYLE_AUTO_ATR && ticketArmed)
+             	{ double flP = NormalizeDouble(entry - indBuf20Pct1R, _Digits); if(targetSL <= 0.0 || flP < targetSL) targetSL = flP; }
+               if(g_enTrail && g_trailStyle == TRAIL_STYLE_AUTO_ATR && ticketArmed && indTrail > 0.0)
+             	{
+                  double trP = NormalizeDouble(indTrail + indWickBuffer, _Digits);
+                  if(trP < entry && (targetSL <= 0.0 || trP < targetSL)) targetSL = trP;
+             	}
+               if(targetSL > 0.0 && (curSL <= 0.0 || targetSL < curSL - _Point * 0.5) && targetSL > ask)
+                  trade.PositionModify(ticket, targetSL, curTP);
+          	}
+       	}
+ 
+         DrawCurrentAtrSpotlight(g_pineTrailingStop, slDistCalc, activeSide, openCount, repSL, g_pineStopPlotting, currentR, g_isTrailingArmedNow);
+    	}
+ 	}
+   else
+ 	{
+      g_isTrailingArmedNow = false;
+      g_resolvedAtrTf  	= ResolveActiveAtrTimeframe(0, 0, 0, 0.0);
+      SyncAnchorDateFields(g_resolvedAtrTf, 0);
+ 
+  	datetime standbyAnchorTime = 0;
+      if(g_autoSyncDate)
+    	{
+     	datetime tfLookbackTime = iTime(_Symbol, g_resolvedAtrTf, g_standbyLookback);
+         standbyAnchorTime   	= (tfLookbackTime > 0) ? tfLookbackTime : (TimeCurrent() - PeriodSeconds(g_resolvedAtrTf) * g_standbyLookback);
+    	}
+  	else
+    	{
+         standbyAnchorTime = StringToTime(StringFormat("%04d.%02d.%02d 00:00", g_entryDateYear, g_entryDateMonth, g_entryDateDay));
+    	}
+ 
+      g_pineTrailingStop = ExecuteExactPineScriptFormula(g_resolvedAtrTf, standbyAnchorTime, g_entryPriceInput, g_tradeSide, g_showAtrPlot, g_autoRestartAtr,
+                                                         g_pineEntryLevel, g_pineFirstBarSlDist, g_pineStopPlotting, g_pineStartCalc);
+      if(!g_showAtrPlot)
+         ObjectsDeleteAll(0, VIS_PREFIX + "ATRLINE_");
+ 
+      DrawCurrentAtrSpotlight(g_pineTrailingStop, g_pineFirstBarSlDist, g_tradeSide, 0, 0.0, g_pineStopPlotting, 0.0, false);
+ 	}
+ 
+   UpdateHudAndTabValues(dayPct, weekPct, monthPct, openCount, totalOpenVol, vwapEntry, repSL, repTP, basketIsLong, anchorPosId, earliestOpenTime, currentR, netFloatingPnl);
+  }
+ 
+void ClampPanelCoordinates()
+  {
+   long chartW = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   long chartH = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+ 
+   int maxX = MathMax(5, (int)chartW - g_panelW - 6);
+   int maxY = MathMax(5, (int)chartH - g_headerH - 8);
+ 
+   if(g_panelX < 5)	g_panelX = 5;
+   if(g_panelX > maxX) g_panelX = maxX;
+   if(g_panelY < 5)	g_panelY = 5;
+   if(g_panelY > maxY) g_panelY = maxY;
+  }
+ 
+void CreateBox(string name, int x, int y, int w, int h, color bg, color border)
+  {
+   string obj = PREFIX + name;
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, obj, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, obj, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, obj, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, obj, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, obj, OBJPROP_BGCOLOR, bg);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, border);
+  }
+ 
+void CreateTxt(string name, int x, int y, string text, color clr, bool bold, int customSize = 0)
+  {
+   string obj = PREFIX + name;
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, obj, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, obj, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      ObjectSetInteger(0, obj, OBJPROP_SELECTABLE, false);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, obj, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, obj, OBJPROP_FONT, bold ? "Segoe UI Bold" : "Segoe UI");
+   ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, (customSize > 0) ? customSize : InpFontSize);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, clr);
+   ObjectSetString(0, obj, OBJPROP_TEXT, text);
+  }
+ 
+void CreateEditBox(string name, int x, int y, int w, int h, string initVal, bool readOnly = false)
+  {
+   string obj = PREFIX + name;
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_EDIT, 0, 0, 0);
+      ObjectSetInteger(0, obj, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, obj, OBJPROP_ALIGN, ALIGN_CENTER);
+      ObjectSetString(0, obj, OBJPROP_FONT, "Segoe UI Bold");
+      ObjectSetString(0, obj, OBJPROP_TEXT, initVal);
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_READONLY, readOnly);
+   ObjectSetInteger(0, obj, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, obj, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, obj, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, obj, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, InpFontSize);
+   ObjectSetInteger(0, obj, OBJPROP_BGCOLOR, readOnly ? C_EDIT_MUTED : C_EDIT_BG);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, C_EDIT_TXT);
+   ObjectSetInteger(0, obj, OBJPROP_BORDER_COLOR, C_BORDER);
+  }
+ 
+void CreateBtn(string name, int x, int y, int w, int h, string text, color bg, color txtClr)
+  {
+   string obj = PREFIX + name;
+   if(ObjectFind(0, obj) < 0)
+ 	{
+  	ObjectCreate(0, obj, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetInteger(0, obj, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetString(0, obj, OBJPROP_FONT, "Segoe UI Bold");
+ 	}
+   ObjectSetInteger(0, obj, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, obj, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, obj, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, obj, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, InpFontSize);
+   ObjectSetInteger(0, obj, OBJPROP_BGCOLOR, bg);
+   ObjectSetInteger(0, obj, OBJPROP_COLOR, txtClr);
+   ObjectSetInteger(0, obj, OBJPROP_BORDER_COLOR, C_BORDER);
+   ObjectSetInteger(0, obj, OBJPROP_STATE, false);
+   ObjectSetString(0, obj, OBJPROP_TEXT, text);
+  }
+ 
+string GetAtrTfBtnLabel()
+  {
+   string activeTf = GetTfShortName(g_resolvedAtrTf);
+   switch(g_atrTfMode)
+ 	{
+  	case ATR_TF_AUTO_ENTRY: return "TF: AUTO (" + activeTf + ")";
+  	case ATR_TF_FIXED_H1:   return "TF: CỐ ĐỊNH H1";
+  	case ATR_TF_FIXED_M15:  return "TF: CỐ ĐỊNH M15";
+  	case ATR_TF_FIXED_M5:   return "TF: CỐ ĐỊNH M5";
+  	case ATR_TF_FIXED_H4:   return "TF: CỐ ĐỊNH H4";
+  	case ATR_TF_FIXED_D1:   return "TF: CỐ ĐỊNH D1";
+  	default:            	return "TF: CHART (" + activeTf + ")";
+ 	}
+  }
+ 
+//+------------------------------------------------------------------+
+//| XÂY DỰNG BẢNG ĐIỀU KHIỂN UX/UI 3 TAB v8.2                    	|
+//+------------------------------------------------------------------+
+void RebuildCleanPanel(bool clearBeforeBuild)
+  {
+   if(clearBeforeBuild)
+      ObjectsDeleteAll(0, PREFIX);
+ 
+   int dpi = TerminalInfoInteger(TERMINAL_SCREEN_DPI);
+   double s = (dpi > 96) ? (dpi / 96.0) : 1.0;
+ 
+   int panelW = (int)MathRound(470 * s);
+   int rowH   = (int)MathRound(26 * s);
+   int ctlH   = (int)MathRound(20 * s);
+   int editW  = (int)MathRound(58 * s);
+   int smallW = (int)MathRound(50 * s);
+   int btnW   = (int)MathRound(98 * s);
+ 
+   g_panelW  = panelW;
+   g_headerH = rowH + 2;
+   g_panelH  = g_isMinimized ? g_headerH : (rowH * 12 + 12);
+ 
+   ClampPanelCoordinates();
+   int baseX = g_panelX;
+   int baseY = g_panelY;
+ 
+   CreateBox("HdrBg", baseX, baseY, panelW, rowH + 2, g_isDraggingPanel ? C_BG_DRAG : C_BG_HEADER, C_BORDER);
+   CreateTxt("HdrTitle", baseX + 10, baseY + rowH / 2,
+             g_isDraggingPanel ? "✥ ĐANG DI CHUYỂN BẢNG..." : "✥ EA PRO v8.2 (GHIM ĐÚNG NẾN ENTRY & NHẬT KÝ TÍN HIỆU)",
+             g_isDraggingPanel ? clrYellow : clrWhite, true);
+ 
+   int minW  = (int)MathRound(28 * s);
+   int cornW = (int)MathRound(64 * s);
+   CreateBtn("Btn_Min",  baseX + panelW - minW - 4,         baseY + 3, minW,  ctlH, g_isMinimized ? "[+]" : "[-]", C_BTN_OFF, clrWhite);
+   CreateBtn("Btn_Area", baseX + panelW - minW - cornW - 8, baseY + 3, cornW, ctlH, "⇄ GÓC", C_BTN_MODE, clrWhite);
+ 
+   if(g_isMinimized)
+ 	{
+  	ChartRedraw(0);
+  	return;
+ 	}
+ 
+   CreateBox("BodyBg", baseX, baseY + rowH + 1, panelW, rowH * 11 + 10, C_BG_BODY, C_BORDER);
+ 
+   int yHud = baseY + rowH + 4;
+   CreateBox("HudCard", baseX + 6, yHud, panelW - 12, rowH * 3 + 2, C_BG_HUD, clrTeal);
+ 
+   CreateTxt("Hud_Line1", baseX + 14, yHud + (int)(13 * s), "ĐANG KIỂM TRA TRẠNG THÁI...", clrLime, true);
+   CreateBtn("Btn_ForceLock", baseX + panelW - btnW - 12, yHud + 3, btnW, ctlH, g_manualForceLock ? "MỞ KHÓA TAY" : "Khóa Ngay", g_manualForceLock ? C_BTN_LOCK : C_BTN_ACT, clrWhite);
+ 
+   CreateTxt("Hud_Line2L", baseX + 14,                  	yHud + (int)(38 * s), "KHỐI LƯỢNG: ...", clrWhite, true);
+   CreateTxt("Hud_Line2R", baseX + (int)MathRound(258 * s), yHud + (int)(38 * s), "TP1/GỒNG: ...",   clrAqua,  true);
+ 
+   CreateTxt("Hud_Line3L", baseX + 14,                  	yHud + (int)(62 * s), "ATR TRAIL: ...",  clrGold,  true);
+   CreateTxt("Hud_Line3R", baseX + (int)MathRound(258 * s), yHud + (int)(62 * s), "TRẠNG THÁI: ...", clrGold,  true);
+ 
+   int yTab = baseY + rowH * 4 + 10;
+   int tabW = (panelW - 20) / 3;
+   CreateBtn("Tab_Pos",   baseX + 6,         	yTab, tabW, ctlH + 3, "1. VỊ THẾ & SL/TP",     (g_activeTab == TAB_POSITION) ? C_TAB_ACTIVE : C_TAB_IDLE, clrWhite);
+   CreateBtn("Tab_Trail", baseX + 10 + tabW, 	yTab, tabW, ctlH + 3, "2. ATR TRAILING GỐC",   (g_activeTab == TAB_TRAILING) ? C_TAB_ACTIVE : C_TAB_IDLE, clrWhite);
+   CreateBtn("Tab_Risk",  baseX + 14 + tabW * 2, yTab, tabW, ctlH + 3, "3. RỦI RO & MỞ KHÓA",   (g_activeTab == TAB_RISKNEWS) ? C_TAB_ACTIVE : C_TAB_IDLE, clrWhite);
+ 
+   int yContent = baseY + rowH * 5 + 14;
+   CreateBox("TabCard", baseX + 6, yContent, panelW - 12, rowH * 5 + 4, C_BG_CARD, C_BORDER);
+ 
+   int colEdit1 = baseX + (int)MathRound(220 * s);
+   int colEdit2 = baseX + (int)MathRound(284 * s);
+   int col3_1   = baseX + (int)MathRound(198 * s);
+   int col3_2   = baseX + (int)MathRound(253 * s);
+   int col3_3   = baseX + (int)MathRound(308 * s);
+   int colBtn   = baseX + panelW - btnW - 12;
+ 
+   if(g_activeTab == TAB_POSITION)
+ 	{
+  	int r = 0, y = yContent + r * rowH + 4;
+  	string slModeTxt = (g_slMode == SL_MODE_ATR_FIRST) ? "SL: ATR ĐẦU" :
+                         ((g_slMode == SL_MODE_ATR_LINE) ? "SL: ĐƯỜNG ATR" :
+                         ((g_slMode == SL_MODE_POINTS)   ? "SL: POINTS" : "SL: KÉO THƯỚC"));
+      CreateTxt("T1_L1", baseX + 14, y + rowH / 2, "Risk/Lệnh (%) | Tỷ lệ TP (R):", clrWhite, false);
+      CreateEditBox("Ed_RiskPct", colEdit1, y + 2, editW, ctlH, DoubleToString(g_riskPct, 2));
+      CreateEditBox("Ed_RR",      colEdit2, y + 2, editW, ctlH, DoubleToString(g_targetRR, 2));
+      CreateBtn("Btn_SlMode", colBtn, y + 2, btnW, ctlH, slModeTxt, C_BTN_MODE, clrWhite);
+ 
+  	r = 1; y = yContent + r * rowH + 4;
+  	string ruleTxt = (g_volRule == RULE_KEEP_DIST_CALC_CASH) ? "GIỮ CỐ ĐỊNH SL/TP -> TÍNH $" : "CO GIÃN SL THEO LOT MỞ & RISK";
+      CreateTxt("T1_L2", baseX + 14, y + rowH / 2, "Quy tắc SL/TP khi có lệnh:", clrAqua, true);
+      CreateBtn("Btn_VolRule", colEdit1, y + 2, panelW - (colEdit1 - baseX) - 12, ctlH, ruleTxt, (g_volRule == RULE_KEEP_DIST_CALC_CASH) ? C_BTN_ON : C_BTN_ACT, clrWhite);
+ 
+  	r = 2; y = yContent + r * rowH + 4;
+  	string multiTxt = (g_multiMode == MULTI_BASKET_VWAP) ? "GỘP RỔ THEO GIÁ TB (VWAP)" : "TÁCH RIÊNG TỪNG LỆNH";
+      CreateTxt("T1_L3", baseX + 14, y + rowH / 2, "Khi vào nhiều lệnh cùng lúc:", clrYellow, true);
+      CreateBtn("Btn_MultiMode", colEdit1, y + 2, panelW - (colEdit1 - baseX) - 12, ctlH, multiTxt, (g_multiMode == MULTI_BASKET_VWAP) ? C_TAB_ACTIVE : C_BTN_OFF, clrWhite);
+ 
+  	r = 3; y = yContent + r * rowH + 4;
+      CreateTxt("T1_L4", baseX + 14, y + rowH / 2, "SL Pts | ĐệmPts | Phí($/Lot):", clrWhite, false);
+      CreateEditBox("Ed_ManSlPts", col3_1, y + 2, smallW, ctlH, IntegerToString(g_manualSlPts));
+      CreateEditBox("Ed_BufPts",   col3_2, y + 2, smallW, ctlH, IntegerToString(g_bufferPts));
+      CreateEditBox("Ed_CommLot",  col3_3, y + 2, smallW, ctlH, DoubleToString(g_commPerLot, 1));
+      CreateBtn("Btn_AutoSlTp", colBtn, y + 2, btnW, ctlH, g_autoSlTp ? "GẮN SL ĐẦU: BẬT" : "GẮN SL ĐẦU: TẮT", g_autoSlTp ? C_BTN_ON : C_BTN_OFF, clrWhite);
+ 
+  	r = 4; y = yContent + r * rowH + 4;
+  	string trailQuickTxt = (g_trailStyle == TRAIL_STYLE_AUTO_ATR) ? "AUTO TRAIL" :
+                             ((g_trailStyle == TRAIL_STYLE_BE_FLOAT) ? "THẢ TRÔI(BE)" : "SL TAY 100%");
+  	color  trailQuickClr = (g_trailStyle == TRAIL_STYLE_AUTO_ATR) ? C_BTN_ON :
+                             ((g_trailStyle == TRAIL_STYLE_BE_FLOAT) ? C_BTN_ACT : C_BTN_OFF);
+  	int wSmallBtn = (int)MathRound(78 * s);
+      CreateTxt("T1_L5", baseX + 14, y + rowH / 2, "Chế độ | Nhật Ký Tín Hiệu:", clrLime, true);
+      CreateBtn("Btn_Trail",     col3_1,             	y + 2, wSmallBtn, ctlH, trailQuickTxt, trailQuickClr, clrWhite);
+      CreateBtn("Btn_Journal",   col3_1 + wSmallBtn + 4, y + 2, wSmallBtn, ctlH, g_showJournal ? "📒 NHẬT KÝ:BẬT" : "📒 NHẬT KÝ:TẮT", g_showJournal ? C_BTN_ON : C_BTN_OFF, clrWhite);
+      CreateBtn("Btn_ShowSizer", colBtn,             	y + 2, btnW,  	ctlH, g_showSizer ? "THƯỚC: HIỆN" : "THƯỚC: ẨN", g_showSizer ? C_BTN_ON : C_BTN_OFF, clrWhite);
+ 	}
+   else if(g_activeTab == TAB_TRAILING)
+ 	{
+  	int r = 0, y = yContent + r * rowH + 4;
+      CreateTxt("T2_L1", baseX + 14, y + rowH / 2, "ATR (Kỳ | FirstDay | Mult):", clrAqua, true);
+      CreateEditBox("Ed_AtrPer",   col3_1, y + 2, smallW, ctlH, IntegerToString(g_atrLength));
+      CreateEditBox("Ed_FirstMul", col3_2, y + 2, smallW, ctlH, DoubleToString(g_customValueForFirstDay, 2));
+      CreateEditBox("Ed_AtrMul",   col3_3, y + 2, smallW, ctlH, DoubleToString(g_atrMultiplier, 2));
+      CreateBtn("Btn_ShowPlot", colBtn, y + 2, btnW, ctlH, g_showAtrPlot ? "VẼ LINE: BẬT" : "VẼ LINE: TẮT", g_showAtrPlot ? C_BTN_ON : C_BTN_OFF, clrWhite);
+ 
+  	r = 1; y = yContent + r * rowH + 4;
+  	string dateLbl = g_autoSyncDate ? "Neo [TỰ ĐỘNG NGÀY MỚI] | Khung:" : "Neo [NGÀY CỐ ĐỊNH] | Khung:";
+      CreateTxt("T2_L2", baseX + 14, y + rowH / 2, dateLbl, g_autoSyncDate ? clrLime : clrYellow, true);
+      CreateEditBox("Ed_Yr", col3_1, y + 2, smallW, ctlH, IntegerToString(g_entryDateYear));
+      CreateEditBox("Ed_Mo", col3_2, y + 2, smallW, ctlH, IntegerToString(g_entryDateMonth));
+      CreateEditBox("Ed_Dy", col3_3, y + 2, smallW, ctlH, IntegerToString(g_entryDateDay));
+      CreateBtn("Btn_AtrTf", colBtn, y + 2, btnW, ctlH, GetAtrTfBtnLabel(), C_BTN_MODE, clrWhite);
+ 
+  	r = 2; y = yContent + r * rowH + 4;
+  	int wAnti1 = (int)MathRound(136 * s);
+  	int wAnti2 = (int)MathRound(120 * s);
+  	string sweepBtnTxt = (g_sweepMode == SWEEP_3LAYER_20PCT_1R)   ? "🛡 GIÁP 3 TẦNG(20%1R)" :
+                           ((g_sweepMode == SWEEP_WAIT_CANDLE_CLOSE) ? "💧 CHỐNG RÂU 2 TẦNG"	: "SL CỨNG TẠI ATR");
+  	color  sweepBtnClr = (g_sweepMode == SWEEP_3LAYER_20PCT_1R)   ? C_BTN_ON :
+                           ((g_sweepMode == SWEEP_WAIT_CANDLE_CLOSE) ? C_TAB_ACTIVE : C_BTN_OFF);
+ 
+      CreateTxt("T2_L3", baseX + 14, y + rowH / 2, "Cơ chế bảo vệ Trailing:", clrLime, true);
+      CreateBtn("Btn_SweepMode", col3_1 - 2,      	y + 2, wAnti1, ctlH, sweepBtnTxt, sweepBtnClr, clrWhite);
+      CreateBtn("Btn_AtrSrc",    col3_1 + wAnti1 + 2, y + 2, wAnti2, ctlH,
+                (g_atrSource == ATR_SRC_CLOSE_SWING) ? "NEO: ĐÓNG NẾN" : "NEO: ĐỈNH/ĐÁY",
+                (g_atrSource == ATR_SRC_CLOSE_SWING) ? C_BTN_MODE : C_BTN_OFF, clrWhite);
+ 
+  	r = 3; y = yContent + r * rowH + 4;
+  	string trailBtnTxt = (g_trailStyle == TRAIL_STYLE_AUTO_ATR) ? "TRAIL: BẬT (>=R)" :
+                           ((g_trailStyle == TRAIL_STYLE_BE_FLOAT) ? "THẢ TRÔI (CHỈ BE)" : "SL TAY 100%");
+  	color  trailBtnClr = (g_trailStyle == TRAIL_STYLE_AUTO_ATR) ? C_BTN_ON :
+                           ((g_trailStyle == TRAIL_STYLE_BE_FLOAT) ? C_BTN_ACT : C_BTN_OFF);
+      CreateTxt("T2_L4", baseX + 14, y + rowH / 2, "Bật Trail (R) | Biên 3 Tầng(%1R):", clrWhite, false);
+      CreateEditBox("Ed_TrailRR",   colEdit1, y + 2, editW, ctlH, DoubleToString(g_trailStartRR, 2), (g_trailStyle != TRAIL_STYLE_AUTO_ATR));
+      CreateEditBox("Ed_TierPct1R", colEdit2, y + 2, editW, ctlH, DoubleToString(g_tierPctOf1R, 0),  (g_sweepMode == SWEEP_HARD_SL_ON_LINE));
+      CreateBtn("Btn_Trail", colBtn, y + 2, btnW, ctlH, trailBtnTxt, trailBtnClr, clrWhite);
+ 
+  	r = 4; y = yContent + r * rowH + 4;
+      CreateTxt("T2_L5", baseX + 14, y + rowH / 2, "TP1 (R | %Vol) | +Points BE:", clrWhite, false);
+      CreateEditBox("Ed_PartRR",  col3_1, y + 2, smallW, ctlH, DoubleToString(g_partialRR, 1));
+      CreateEditBox("Ed_PartPct", col3_2, y + 2, smallW, ctlH, DoubleToString(g_partialPct, 0));
+      CreateEditBox("Ed_BePts",   col3_3, y + 2, smallW, ctlH, IntegerToString(g_bePoints), !g_enBe);
+      CreateBtn("Btn_Be", colBtn, y + 2, btnW, ctlH, g_enBe ? "BE & TP1: BẬT" : "BE: TẮT", g_enBe ? C_BTN_ON : C_BTN_OFF, clrWhite);
+ 	}
+   else // TAB_RISKNEWS
+ 	{
+  	int r = 0, y = yContent + r * rowH + 4;
+      CreateTxt("T3_L1", baseX + 14, y + rowH / 2, "Max Lỗ Ngày|Tuần|Tháng(%):", clrWhite, true);
+      CreateEditBox("Ed_MaxDay",   col3_1, y + 2, smallW, ctlH, DoubleToString(g_maxDailyLossPct, 1),   g_riskBreached);
+      CreateEditBox("Ed_MaxWeek",  col3_2, y + 2, smallW, ctlH, DoubleToString(g_maxWeeklyLossPct, 1),  g_riskBreached);
+      CreateEditBox("Ed_MaxMonth", col3_3, y + 2, smallW, ctlH, DoubleToString(g_maxMonthlyLossPct, 1), g_riskBreached);
+      CreateBtn("Btn_RiskGuard", colBtn, y + 2, btnW, ctlH, g_riskBreached ? "ĐANG KHÓA CỨNG" : (g_enRiskGuard ? "BẢO VỆ: BẬT" : "BẢO VỆ: TẮT"),
+                g_riskBreached ? C_BTN_LOCK : (g_enRiskGuard ? C_BTN_ON : C_BTN_OFF), clrWhite);
+ 
+  	r = 1; y = yContent + r * rowH + 4;
+      CreateTxt("T3_L2", baseX + 14, y + rowH / 2, "Vốn tính Risk ($):", clrWhite, false);
+      CreateEditBox("Ed_CustomEq", colEdit1, y + 2, editW * 2 + 6, ctlH, DoubleToString(g_customEquity, 0));
+      CreateBtn("Btn_GetRealEq", colBtn, y + 2, btnW, ctlH, "Vốn Sàn", C_BTN_MODE, clrWhite);
+ 
+  	r = 2; y = yContent + r * rowH + 4;
+      CreateTxt("T3_L3", baseX + 14, y + rowH / 2, "Phút cấm (Trước | Sau tin):", clrWhite, false);
+      CreateEditBox("Ed_MinBef", colEdit1, y + 2, editW, ctlH, IntegerToString(g_minBeforeNews));
+      CreateEditBox("Ed_MinAft", colEdit2, y + 2, editW, ctlH, IntegerToString(g_minAfterNews));
+      CreateBtn("Btn_News", colBtn, y + 2, btnW, ctlH, g_enNewsFilter ? "LỌC TIN: BẬT" : "LỌC TIN: TẮT", g_enNewsFilter ? C_BTN_ON : C_BTN_OFF, clrWhite);
+ 
+  	r = 3; y = yContent + r * rowH + 4;
+  	int wSlotBtn = (int)MathRound(57 * s);
+  	int gapSlot  = (int)MathRound(4 * s);
+  	int xS1  	= baseX + 12;
+  	int xS2  	= xS1 + wSlotBtn + gapSlot;
+  	int xS3  	= xS2 + wSlotBtn + gapSlot;
+ 
+      CreateBtn("Btn_EnSlot1", xS1, y + 2, wSlotBtn, ctlH, g_enSlot1 ? "✓ TIN 1" : "✗ TIN 1", g_enSlot1 ? C_BTN_ON : C_BTN_OFF, clrWhite);
+      CreateBtn("Btn_EnSlot2", xS2, y + 2, wSlotBtn, ctlH, g_enSlot2 ? "✓ TIN 2" : "✗ TIN 2", g_enSlot2 ? C_BTN_ON : C_BTN_OFF, clrWhite);
+      CreateBtn("Btn_EnSlot3", xS3, y + 2, wSlotBtn, ctlH, g_enSlot3 ? "✓ TIN 3" : "✗ TIN 3", g_enSlot3 ? C_BTN_ON : C_BTN_OFF, clrWhite);
+ 
+      CreateEditBox("Ed_Slot1", col3_1, y + 2, smallW, ctlH, g_newsSlot1, !g_enSlot1);
+      CreateEditBox("Ed_Slot2", col3_2, y + 2, smallW, ctlH, g_newsSlot2, !g_enSlot2);
+      CreateEditBox("Ed_Slot3", col3_3, y + 2, smallW, ctlH, g_newsSlot3, !g_enSlot3);
+      CreateBtn("Btn_NewsTz", colBtn, y + 2, btnW, ctlH, (g_newsTz == TZ_LOCAL_PC) ? "GIỜ MÁY (VN)" : "GIỜ SÀN MT5", C_BTN_MODE, clrWhite);
+ 
+  	r = 4; y = yContent + r * rowH + 4;
+      CreateTxt("T3_L5", baseX + 14, y + rowH / 2, "Hạ nhiệt(h) | Lãi PH(%) | PIN:", clrAqua, true);
+      CreateEditBox("Ed_Cooldown", col3_1, y + 2, smallW, ctlH, DoubleToString(g_cooldownHours, 1), g_riskBreached);
+      CreateEditBox("Ed_RecTarg",  col3_2, y + 2, smallW, ctlH, DoubleToString(g_recoveryTargetPct, 1));
+      CreateEditBox("Ed_PinCode",  col3_3, y + 2, smallW, ctlH, g_enteredPinStr);
+      CreateBtn("Btn_PinUnlock", colBtn, y + 2, btnW, ctlH, "MỞ KHÓA PIN", C_BTN_LOCK, clrWhite);
+ 	}
+ 
+   int yFoot = baseY + rowH * 10 + 22;
+   int qW	= (panelW - 24) / 4;
+   CreateBtn("Btn_SyncSlTp", baseX + 6,       	yFoot, qW, ctlH + 4, "Gắn SL/TP Thước", C_BTN_BUY,  clrWhite);
+   CreateBtn("Btn_NowBE",    baseX + 10 + qW, 	yFoot, qW, ctlH + 4, "Dời BE Cả Rổ",    C_BTN_ACT,  clrWhite);
+   CreateBtn("Btn_Close50",  baseX + 14 + qW * 2, yFoot, qW, ctlH + 4, "Đóng 50% Vol",	C_BTN_ACT,  clrWhite);
+   CreateBtn("Btn_CloseAll", baseX + 18 + qW * 3, yFoot, qW, ctlH + 4, "ĐÓNG TẤT CẢ",     C_BTN_SELL, clrWhite);
+  }
+ 
+void UpdateHudAndTabValues(double dayPct, double weekPct, double monthPct,
+                           int openCount, double totalOpenVol, double vwapEntry,
+                           double repSL, double repTP, bool basketIsLong, long anchorId, datetime earliestOpenTime,
+                           double currentR, double netFloatingPnl)
+  {
+   if(g_isMinimized)
+  	return;
+ 
+   double slDist, slPts, recLot, dispVol, dispRiskCash, dispRiskPct, dispRewardCash, partLot, remLot;
+   CalculateSizingAndActiveRules(openCount, totalOpenVol, vwapEntry, repSL, repTP, basketIsLong, anchorId, earliestOpenTime,
+                             	slDist, slPts, recLot, dispVol, dispRiskCash, dispRiskPct, dispRewardCash, partLot, remLot);
+ 
+   bool algoOn = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED));
+   string tfName = GetTfShortName(g_resolvedAtrTf);
+ 
+   string stTxt = algoOn ? (openCount > 0 ? StringFormat("QUẢN LÝ %d LỆNH (TF:%s | %s)", openCount, tfName, (g_multiMode == MULTI_BASKET_VWAP ? "VWAP" : "RIÊNG"))
+                                      	: StringFormat("CHỜ LỆNH TAY (TF ATR: %s)", tfName))
+                         : "⚠ CHƯA BẬT ALGO TRADING!";
+   color stClr  = algoOn ? ((g_inRecoveryMode && g_enHalfRiskRec) ? clrOrange : (openCount > 0 ? clrLime : clrAqua)) : clrYellow;
+ 
+   if(g_riskBreached || g_manualForceLock)
+ 	{
+  	stTxt = g_manualForceLock ? "ĐÃ KHÓA THỦ CÔNG" : g_breachReason;
+  	stClr = clrRed;
+ 	}
+   else if(g_enNewsFilter && g_newsLockedState)
+ 	{
+  	stTxt = "TẠM KHÓA (ĐANG TRONG GIỜ TIN)";
+  	stClr = clrOrangeRed;
+ 	}
+ 
+   string hud1 = StringFormat("%s | N:%.1f%% T:%.1f%% Th:%.1f%%", stTxt, dayPct, weekPct, monthPct);
+   ObjectSetString(0,  PREFIX + "Hud_Line1", OBJPROP_TEXT, hud1);
+   ObjectSetInteger(0, PREFIX + "Hud_Line1", OBJPROP_COLOR, stClr);
+ 
+   if(ObjectFind(0, PREFIX + "Btn_AtrTf") >= 0)
+      ObjectSetString(0, PREFIX + "Btn_AtrTf", OBJPROP_TEXT, GetAtrTfBtnLabel());
+ 
+   double activeRisk = GetActiveRiskPercent();
+   string hud2L = "", hud2R = "";
+   if(openCount > 0)
+ 	{
+  	hud2L = StringFormat("MỞ: %.2f Lot (SL: %.0f pts) | -$%.1f", dispVol, slPts, dispRiskCash);
+  	hud2R = StringFormat("Risk: %.2f%% | TP1:%.2f / Gồng:%.2f", dispRiskPct, partLot, remLot);
+ 	}
+   else
+ 	{
+  	hud2L = StringFormat("GỢI Ý: %.2f Lot (SL: %.0f pts) | -$%.1f", recLot, slPts, dispRiskCash);
+  	hud2R = StringFormat("Risk: %.2f%% | TP1:%.2f / Gồng:%.2f", activeRisk, partLot, remLot);
+ 	}
+   ObjectSetString(0,  PREFIX + "Hud_Line2L", OBJPROP_TEXT, hud2L);
+   ObjectSetInteger(0, PREFIX + "Hud_Line2L", OBJPROP_COLOR, (openCount > 0) ? clrLime : clrYellow);
+   ObjectSetString(0,  PREFIX + "Hud_Line2R", OBJPROP_TEXT, hud2R);
+   ObjectSetInteger(0, PREFIX + "Hud_Line2R", OBJPROP_COLOR, clrAqua);
+ 
+   string hud3L = "", hud3R = "";
+   color  hud3Clr = clrGold;
+ 
+   if(openCount > 0)
+ 	{
+  	hud3L = StringFormat("🎯 ATR(%s): %s | %+.2fR ($%.1f)", tfName, DoubleToString(g_pineTrailingStop, _Digits), currentR, netFloatingPnl);
+  	if(g_trailStyle == TRAIL_STYLE_MANUAL_SL)
+     	hud3R = "[SL TAY 100% - THẢ TRÔI]";
+  	else if(g_trailStyle == TRAIL_STYLE_BE_FLOAT || !g_enTrail)
+     	hud3R = "[THẢ TRÔI (CHỈ DỜI BE)]";
+  	else if(g_isTrailingArmedNow)
+     	hud3R = StringFormat("[ĐANG BẬT 3 TẦNG: %d💧 | %d◐]", g_tier1SavedCount, g_tier2HalfCutCount);
+  	else
+     	hud3R = StringFormat("[CỐ ĐỊNH | Chờ +%.1fR bật Trail]", g_trailStartRR);
+ 
+  	hud3Clr = (g_enTrail && g_isTrailingArmedNow) ? clrLime : clrGold;
+ 	}
+   else
+ 	{
+  	hud3L = StringFormat("🎯 ATR(%s): %s (%d💧|%d◐)", tfName, DoubleToString(g_pineTrailingStop, _Digits), g_tier1SavedCount, g_tier2HalfCutCount);
+  	hud3R = g_newsStatusText;
+  	hud3Clr = g_newsLockedState ? clrRed : clrAqua;
+ 	}
+ 
+   ObjectSetString(0,  PREFIX + "Hud_Line3L", OBJPROP_TEXT, hud3L);
+   ObjectSetInteger(0, PREFIX + "Hud_Line3L", OBJPROP_COLOR, hud3Clr);
+   ObjectSetString(0,  PREFIX + "Hud_Line3R", OBJPROP_TEXT, hud3R);
+   ObjectSetInteger(0, PREFIX + "Hud_Line3R", OBJPROP_COLOR, hud3Clr);
+ 
+   ChartRedraw(0);
+  }
+ 
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+  {
+   if(id == CHARTEVENT_MOUSE_MOVE)
+ 	{
+  	int  mouseX    = (int)lparam;
+  	int  mouseY    = (int)dparam;
+  	uint mouseFlag = (uint)StringToInteger(sparam);
+  	bool leftDown  = ((mouseFlag & 1) == 1);
+ 
+  	if(leftDown && !g_prevMouseLeftDown)
+    	{
+     	int dragZoneRight = g_panelX + g_panelW - 105;
+     	if(mouseX >= g_panelX && mouseX <= dragZoneRight &&
+        	mouseY >= g_panelY && mouseY <= g_panelY + g_headerH)
+       	{
+            g_isDraggingPanel = true;
+            g_dragOffsetX 	= mouseX - g_panelX;
+            g_dragOffsetY 	= mouseY - g_panelY;
+            ChartSetInteger(0, CHART_MOUSE_SCROLL, false);
+            RebuildCleanPanel(false);
+            ChartRedraw(0);
+       	}
+    	}
+  	else if(leftDown && g_isDraggingPanel)
+    	{
+     	int newX = mouseX - g_dragOffsetX;
+     	int newY = mouseY - g_dragOffsetY;
+         if(MathAbs(newX - g_panelX) >= 2 || MathAbs(newY - g_panelY) >= 2)
+       	{
+        	g_panelX = newX;
+        	g_panelY = newY;
+            ClampPanelCoordinates();
+            RebuildCleanPanel(false);
+            ChartRedraw(0);
+       	}
+    	}
+  	else if(!leftDown && g_isDraggingPanel)
+    	{
+         g_isDraggingPanel = false;
+         ChartSetInteger(0, CHART_MOUSE_SCROLL, true);
+         RebuildCleanPanel(false);
+         ChartRedraw(0);
+    	}
+ 
+      g_prevMouseLeftDown = leftDown;
+  	return;
+ 	}
+ 
+   if(id == CHARTEVENT_CHART_CHANGE)
+ 	{
+      ClampPanelCoordinates();
+      RebuildCleanPanel(false);
+      ProcessCoreLogic();
+  	return;
+ 	}
+ 
+   if(id == CHARTEVENT_OBJECT_DRAG)
+ 	{
+  	if(sparam == DRAG_PREFIX + "ENTRY")
+    	{
+     	g_slMode      	= SL_MODE_DRAG;
+         g_pinSizerEntry   = true;
+         g_sizerEntryPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
+         RebuildCleanPanel(false);
+         ProcessCoreLogic();
+    	}
+  	else if(sparam == DRAG_PREFIX + "SL")
+    	{
+     	g_slMode    	= SL_MODE_DRAG;
+         g_pinSizerEntry = true;
+         g_sizerSlPrice  = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
+         g_manualSlPts   = (int)MathRound(MathAbs(g_sizerEntryPrice - g_sizerSlPrice) / _Point);
+         if(ObjectFind(0, PREFIX + "Ed_ManSlPts") >= 0)
+            ObjectSetString(0, PREFIX + "Ed_ManSlPts", OBJPROP_TEXT, IntegerToString(g_manualSlPts));
+         RebuildCleanPanel(false);
+         ProcessCoreLogic();
+    	}
+  	else if(sparam == DRAG_PREFIX + "TP")
+    	{
+     	g_slMode    	= SL_MODE_DRAG;
+         g_pinSizerEntry = true;
+         g_sizerTpPrice  = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
+     	double slDist   = MathAbs(g_sizerEntryPrice - g_sizerSlPrice);
+     	if(slDist > 0.0)
+        	g_targetRR = MathAbs(g_sizerTpPrice - g_sizerEntryPrice) / slDist;
+         if(ObjectFind(0, PREFIX + "Ed_RR") >= 0)
+            ObjectSetString(0, PREFIX + "Ed_RR", OBJPROP_TEXT, DoubleToString(g_targetRR, 2));
+         RebuildCleanPanel(false);
+         ProcessCoreLogic();
+    	}
+  	return;
+ 	}
+ 
+   if(id == CHARTEVENT_OBJECT_ENDEDIT)
+ 	{
+  	string rawText = ObjectGetString(0, sparam, OBJPROP_TEXT);
+  	if(sparam == PREFIX + "Ed_PinCode")
+    	{
+         g_enteredPinStr = rawText;
+         RebuildCleanPanel(false);
+     	return;
+    	}
+ 
+  	string valStr = rawText;
+      StringReplace(valStr, ",", ".");
+  	double valDbl = StringToDouble(valStr);
+  	int	valInt = (int)StringToInteger(valStr);
+ 
+  	if(sparam == PREFIX + "Ed_RiskPct"   && valDbl > 0.0)  g_riskPct            	= valDbl;
+  	if(sparam == PREFIX + "Ed_RR"        && valDbl > 0.0)  g_targetRR           	= valDbl;
+  	if(sparam == PREFIX + "Ed_ManSlPts"  && valInt >= 1)   { g_manualSlPts = valInt; g_slMode = SL_MODE_POINTS; }
+  	if(sparam == PREFIX + "Ed_BufPts"    && valInt >= 0)   g_bufferPts          	= valInt;
+  	if(sparam == PREFIX + "Ed_CommLot"   && valDbl >= 0.0) g_commPerLot         	= valDbl;
+ 
+  	if(sparam == PREFIX + "Ed_AtrPer"    && valInt >= 1)   g_atrLength          	= valInt;
+  	if(sparam == PREFIX + "Ed_FirstMul"  && valDbl > 0.0)  g_customValueForFirstDay = valDbl;
+  	if(sparam == PREFIX + "Ed_AtrMul"    && valDbl > 0.0)  g_atrMultiplier      	= valDbl;
+  	if(sparam == PREFIX + "Ed_TrailRR"   && valDbl >= 0.0) g_trailStartRR       	= valDbl;
+  	if(sparam == PREFIX + "Ed_TierPct1R" && valDbl >= 5.0 && valDbl <= 90.0) g_tierPctOf1R = valDbl;
+  	if(sparam == PREFIX + "Ed_PartRR"    && valDbl > 0.0)  g_partialRR          	= valDbl;
+  	if(sparam == PREFIX + "Ed_PartPct"   && valDbl > 0.0 && valDbl <= 100.0) g_partialPct = valDbl;
+  	if(sparam == PREFIX + "Ed_BePts"     && valInt >= 0)   g_bePoints           	= valInt;
+ 
+      if(!g_riskBreached)
+    	{
+     	if(sparam == PREFIX + "Ed_MaxDay"   && valDbl > 0.0)  g_maxDailyLossPct   = valDbl;
+     	if(sparam == PREFIX + "Ed_MaxWeek"  && valDbl > 0.0)  g_maxWeeklyLossPct  = valDbl;
+     	if(sparam == PREFIX + "Ed_MaxMonth" && valDbl > 0.0)  g_maxMonthlyLossPct = valDbl;
+     	if(sparam == PREFIX + "Ed_Cooldown" && valDbl >= 0.0) g_cooldownHours 	= valDbl;
+    	}
+  	else if(sparam == PREFIX + "Ed_MaxDay" || sparam == PREFIX + "Ed_MaxWeek" || sparam == PREFIX + "Ed_MaxMonth" || sparam == PREFIX + "Ed_Cooldown")
+    	{
+         Alert("ĐANG KHÓA KỶ LUẬT! Không thể tự ý nới rộng hạn mức lỗ hoặc giảm giờ Hạ nhiệt.");
+    	}
+ 
+  	if(sparam == PREFIX + "Ed_CustomEq" && valDbl >= 0.0) g_customEquity  	= valDbl;
+  	if(sparam == PREFIX + "Ed_MinBef"   && valInt >= 0)   g_minBeforeNews 	= valInt;
+  	if(sparam == PREFIX + "Ed_MinAft"   && valInt >= 0)   g_minAfterNews  	= valInt;
+  	if(sparam == PREFIX + "Ed_Slot1")                 	g_newsSlot1     	= rawText;
+  	if(sparam == PREFIX + "Ed_Slot2")                 	g_newsSlot2     	= rawText;
+  	if(sparam == PREFIX + "Ed_Slot3")                 	g_newsSlot3     	= rawText;
+ 
+  	if(sparam == PREFIX + "Ed_Yr" || sparam == PREFIX + "Ed_Mo" || sparam == PREFIX + "Ed_Dy")
+    	{
+     	if(valInt <= 0)
+       	{
+            g_autoSyncDate = true;
+            SyncAnchorDateFields(g_resolvedAtrTf, 0);
+       	}
+     	else
+       	{
+            g_autoSyncDate = false;
+        	if(sparam == PREFIX + "Ed_Yr" && valInt >= 1900 && valInt <= 2100) g_entryDateYear  = valInt;
+        	if(sparam == PREFIX + "Ed_Mo" && valInt >= 1	&& valInt <= 12)   g_entryDateMonth = valInt;
+        	if(sparam == PREFIX + "Ed_Dy" && valInt >= 1	&& valInt <= 31)   g_entryDateDay   = valInt;
+       	}
+    	}
+ 
+  	if(sparam == PREFIX + "Ed_RecTarg" && valDbl > 0.0) g_recoveryTargetPct = valDbl;
+ 
+      RebuildCleanPanel(false);
+      ProcessCoreLogic();
+  	return;
+ 	}
+ 
+   if(id == CHARTEVENT_OBJECT_CLICK)
+ 	{
+      ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+ 
+  	if(sparam == PREFIX + "Tab_Pos")
+    	{ g_activeTab = TAB_POSITION; RebuildCleanPanel(true); ProcessCoreLogic(); return; }
+  	if(sparam == PREFIX + "Tab_Trail")
+    	{ g_activeTab = TAB_TRAILING; RebuildCleanPanel(true); ProcessCoreLogic(); return; }
+  	if(sparam == PREFIX + "Tab_Risk")
+    	{ g_activeTab = TAB_RISKNEWS; RebuildCleanPanel(true); ProcessCoreLogic(); return; }
+ 
+  	if(sparam == PREFIX + "Btn_Min")
+    	{
+     	g_isMinimized = !g_isMinimized;
+         RebuildCleanPanel(true);
+         ProcessCoreLogic();
+     	return;
+    	}
+  	else if(sparam == PREFIX + "Btn_Area")
+    	{
+     	long chartW = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+     	long chartH = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+         g_cornerPresetIdx = (g_cornerPresetIdx + 1) % 4;
+         if(g_cornerPresetIdx == 0)  	{ g_panelX = 14;                          g_panelY = 82; }
+     	else if(g_cornerPresetIdx == 1) { g_panelX = (int)chartW - g_panelW - 14; g_panelY = 18; }
+     	else if(g_cornerPresetIdx == 2) { g_panelX = (int)chartW - g_panelW - 14; g_panelY = (int)chartH - g_panelH - 15; }
+     	else                        	{ g_panelX = 14;                      	g_panelY = (int)chartH - g_panelH - 15; }
+         ClampPanelCoordinates();
+         RebuildCleanPanel(false);
+         ProcessCoreLogic();
+     	return;
+    	}
+  	else if(sparam == PREFIX + "Btn_ForceLock")
+    	{
+         g_manualForceLock = !g_manualForceLock;
+         if(g_manualForceLock)
+            CloseAllTradesAndOrders("Người dùng bấm nút Khóa Ngay");
+    	}
+  	else if(sparam == PREFIX + "Btn_RiskGuard")
+    	{
+         if(g_riskBreached)
+            Alert("ĐANG KHÓA KỶ LUẬT! Không thể tắt Bảo vệ khi đang vi phạm.");
+     	else
+            g_enRiskGuard = !g_enRiskGuard;
+    	}
+  	else if(sparam == PREFIX + "Btn_PinUnlock")
+    	{
+         TryEmergencyPinUnlock();
+     	return;
+    	}
+  	else if(sparam == PREFIX + "Btn_SlMode")
+    	{
+     	if(g_slMode == SL_MODE_ATR_FIRST) 	g_slMode = SL_MODE_ATR_LINE;
+     	else if(g_slMode == SL_MODE_ATR_LINE) g_slMode = SL_MODE_POINTS;
+     	else if(g_slMode == SL_MODE_POINTS)   g_slMode = SL_MODE_DRAG;
+     	else                              	g_slMode = SL_MODE_ATR_FIRST;
+    	}
+  	else if(sparam == PREFIX + "Btn_AtrTf")
+    	{
+         if(g_atrTfMode == ATR_TF_AUTO_ENTRY)     g_atrTfMode = ATR_TF_FIXED_H1;
+     	else if(g_atrTfMode == ATR_TF_FIXED_H1)  g_atrTfMode = ATR_TF_FIXED_M15;
+     	else if(g_atrTfMode == ATR_TF_FIXED_M15) g_atrTfMode = ATR_TF_FIXED_M5;
+     	else if(g_atrTfMode == ATR_TF_FIXED_M5)  g_atrTfMode = ATR_TF_FIXED_H4;
+     	else if(g_atrTfMode == ATR_TF_FIXED_H4)  g_atrTfMode = ATR_TF_FIXED_D1;
+     	else if(g_atrTfMode == ATR_TF_FIXED_D1)  g_atrTfMode = ATR_TF_CHART_CUR;
+     	else                                     g_atrTfMode = ATR_TF_AUTO_ENTRY;
+ 
+         g_autoSyncDate = true;
+    	}
+  	else if(sparam == PREFIX + "Btn_Journal")
+    	{
+     	g_showJournal = !g_showJournal;
+    	}
+  	else if(sparam == PREFIX + "Btn_VolRule")
+    	{
+     	g_volRule = (g_volRule == RULE_KEEP_DIST_CALC_CASH) ? RULE_SCALE_DIST_BY_VOL : RULE_KEEP_DIST_CALC_CASH;
+    	}
+  	else if(sparam == PREFIX + "Btn_MultiMode")
+    	{
+     	g_multiMode = (g_multiMode == MULTI_BASKET_VWAP) ? MULTI_INDIVIDUAL : MULTI_BASKET_VWAP;
+    	}
+  	else if(sparam == PREFIX + "Btn_SweepMode")
+    	{
+         if(g_sweepMode == SWEEP_3LAYER_20PCT_1R)    	g_sweepMode = SWEEP_WAIT_CANDLE_CLOSE;
+     	else if(g_sweepMode == SWEEP_WAIT_CANDLE_CLOSE) g_sweepMode = SWEEP_HARD_SL_ON_LINE;
+     	else                                            g_sweepMode = SWEEP_3LAYER_20PCT_1R;
+    	}
+  	else if(sparam == PREFIX + "Btn_AtrSrc")
+    	{
+     	g_atrSource = (g_atrSource == ATR_SRC_CLOSE_SWING) ? ATR_SRC_HIGH_LOW : ATR_SRC_CLOSE_SWING;
+    	}
+  	else if(sparam == PREFIX + "Btn_Trail")
+    	{
+         if(g_trailStyle == TRAIL_STYLE_AUTO_ATR)   	g_trailStyle = TRAIL_STYLE_BE_FLOAT;
+     	else if(g_trailStyle == TRAIL_STYLE_BE_FLOAT)  g_trailStyle = TRAIL_STYLE_MANUAL_SL;
+     	else                                           g_trailStyle = TRAIL_STYLE_AUTO_ATR;
+         ApplyTrailStyleFlags();
+    	}
+  	else if(sparam == PREFIX + "Btn_AutoSlTp")  g_autoSlTp	= !g_autoSlTp;
+  	else if(sparam == PREFIX + "Btn_ShowSizer") g_showSizer   = !g_showSizer;
+  	else if(sparam == PREFIX + "Btn_ShowPlot")  g_showAtrPlot = !g_showAtrPlot;
+  	else if(sparam == PREFIX + "Btn_Be")
+    	{
+     	g_enBe  	= !g_enBe;
+     	g_enPartial = g_enBe;
+     	if(!g_enBe && !g_enTrail)
+            g_trailStyle = TRAIL_STYLE_MANUAL_SL;
+     	else if(g_enBe && !g_enTrail)
+            g_trailStyle = TRAIL_STYLE_BE_FLOAT;
+    	}
+  	else if(sparam == PREFIX + "Btn_GetRealEq")
+    	{
+     	double realEq = AccountInfoDouble(ACCOUNT_EQUITY);
+     	if(realEq > 0.0)
+       	{
+            g_customEquity = NormalizeDouble(realEq, 0);
+            if(ObjectFind(0, PREFIX + "Ed_CustomEq") >= 0)
+               ObjectSetString(0, PREFIX + "Ed_CustomEq", OBJPROP_TEXT, DoubleToString(g_customEquity, 0));
+       	}
+    	}
+  	else if(sparam == PREFIX + "Btn_News")      g_enNewsFilter = !g_enNewsFilter;
+  	else if(sparam == PREFIX + "Btn_EnSlot1")   g_enSlot1  	= !g_enSlot1;
+  	else if(sparam == PREFIX + "Btn_EnSlot2")   g_enSlot2  	= !g_enSlot2;
+  	else if(sparam == PREFIX + "Btn_EnSlot3")   g_enSlot3  	= !g_enSlot3;
+  	else if(sparam == PREFIX + "Btn_NewsTz")    g_newsTz   	= (g_newsTz == TZ_LOCAL_PC) ? TZ_MT5_SERVER : TZ_LOCAL_PC;
+  	else if(sparam == PREFIX + "Btn_SyncSlTp")
+    	{
+     	for(int i = PositionsTotal() - 1; i >= 0; i--)
+       	{
+        	ulong t = PositionGetTicket(i);
+        	if(t > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+               trade.PositionModify(t, NormalizeDouble(g_sizerSlPrice, _Digits), NormalizeDouble(g_sizerTpPrice, _Digits));
+       	}
+    	}
+  	else if(sparam == PREFIX + "Btn_NowBE")
+    	{
+     	double sumPV = 0.0, sumV = 0.0;
+     	bool   isBuy = true;
+     	for(int k = PositionsTotal() - 1; k >= 0; k--)
+       	{
+        	ulong tk = PositionGetTicket(k);
+        	if(tk > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+          	{
+           	double v = PositionGetDouble(POSITION_VOLUME);
+               sumV  += v;
+           	sumPV += PositionGetDouble(POSITION_PRICE_OPEN) * v;
+               isBuy  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+          	}
+       	}
+     	double avgEntry = (sumV > 0.0) ? (sumPV / sumV) : 0.0;
+ 
+     	for(int i = PositionsTotal() - 1; i >= 0; i--)
+       	{
+        	ulong t = PositionGetTicket(i);
+        	if(t > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+          	{
+           	double baseE = (g_multiMode == MULTI_BASKET_VWAP && avgEntry > 0.0) ? avgEntry : PositionGetDouble(POSITION_PRICE_OPEN);
+           	double tp	= PositionGetDouble(POSITION_TP);
+           	double beSL  = isBuy ? NormalizeDouble(baseE + g_bePoints * _Point, _Digits) : NormalizeDouble(baseE - g_bePoints * _Point, _Digits);
+               trade.PositionModify(t, beSL, tp);
+          	}
+       	}
+    	}
+  	else if(sparam == PREFIX + "Btn_Close50")
+    	{
+     	for(int i = PositionsTotal() - 1; i >= 0; i--)
+       	{
+        	ulong t = PositionGetTicket(i);
+        	if(t > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+          	{
+           	double vol  = PositionGetDouble(POSITION_VOLUME);
+           	double half = FloorLotStep(vol * 0.5);
+           	if(half >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+                  trade.PositionClosePartial(t, half);
+          	}
+       	}
+    	}
+  	else if(sparam == PREFIX + "Btn_CloseAll")
+    	{
+         CloseAllTradesAndOrders("Người dùng bấm nút ĐÓNG TẤT CẢ");
+    	}
+ 
+      RebuildCleanPanel(false);
+      ProcessCoreLogic();
+ 	}
+  }
+ 
+void OnTick()  { ProcessCoreLogic(); }
+void OnTimer() { ProcessCoreLogic(); }
+//+------------------------------------------------------------------+
+
